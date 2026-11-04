@@ -787,3 +787,8 @@ Copyright (C) 2026 the Taiji Desktop project authors.
 
 平台名称与图标属于各自厂商的商标，仅用于识别模拟平台；本项目与任何主机厂商无关联。
 完整声明见 `THIRD_PARTY.md`。
+
+## 相关仓库
+
+- 主程序：<https://github.com/linuxersx/taiji-desktop>
+- 输入法 / 屏幕键盘：<https://github.com/linuxersx/armdeck-osk>
