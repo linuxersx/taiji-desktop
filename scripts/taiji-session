@@ -1,0 +1,32 @@
+#!/bin/sh
+# Taiji kiosk session for X11 display managers.
+set -eu
+
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=Taiji
+export GTK_USE_PORTAL=1
+export TAIJI_SESSION_MODE=x11
+export TAIJI_BIN="${TAIJI_BIN:-$(command -v taiji 2>/dev/null || echo /usr/bin/taiji)}"
+
+command -v xset >/dev/null 2>&1 && xset s off >/dev/null 2>&1 || true
+command -v xset >/dev/null 2>&1 && xset -dpms >/dev/null 2>&1 || true
+command -v xsetroot >/dev/null 2>&1 && xsetroot -solid black >/dev/null 2>&1 || true
+command -v xrandr >/dev/null 2>&1 && xrandr --auto >/dev/null 2>&1 || true
+
+if [ "${TAIJI_NO_WM:-0}" != "1" ]; then
+    if command -v openbox >/dev/null 2>&1; then
+        OB_CONFIG="${TAIJI_OPENBOX_CONFIG:-/etc/taiji/openbox-rc.xml}"
+        [ -f "$OB_CONFIG" ] || OB_CONFIG="/usr/share/taiji/openbox-rc.xml"
+        openbox --config-file "$OB_CONFIG" >/dev/null 2>&1 &
+    elif command -v matchbox-window-manager >/dev/null 2>&1; then
+        matchbox-window-manager -use_titlebar no >/dev/null 2>&1 &
+    fi
+fi
+
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/taiji"
+mkdir -p "$LOG_DIR"
+HOTKEYD="${TAIJI_HOTKEYD:-/usr/libexec/taiji/taiji-hotkeyd}"
+if [ -x "$HOTKEYD" ]; then
+    "$HOTKEYD" >>"$LOG_DIR/hotkeyd.log" 2>&1 &
+fi
+exec "$(dirname "$0")/taiji-session-loop" >>"$LOG_DIR/session.log" 2>&1

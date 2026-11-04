@@ -1,0 +1,134 @@
+#!/bin/sh
+# Return to Taiji from the current foreground app. This script is triggered by
+# taiji-hotkeyd, a keyboard shortcut, or the app card in Taiji.
+set -u
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-$SELF_DIR/taiji-scale}"
+[ -x "$SCALE_HELPER" ] || SCALE_HELPER="/usr/libexec/taiji/taiji-scale"
+
+FG=""; APP_ID=""; APP_STATE=""; ON_RETURN=""; PID=""; PGID=""
+if [ -f "$STATE_FILE" ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in
+            foreground) FG="$v" ;;
+            app_id) APP_ID="$v" ;;
+            app_state) APP_STATE="$v" ;;
+            on_return) ON_RETURN="$v" ;;
+            pid) PID="$v" ;;
+            pgid) PGID="$v" ;;
+        esac
+    done < "$STATE_FILE"
+fi
+
+SWAY=""; WMCTRL=""
+command -v swaymsg >/dev/null 2>&1 && SWAY=1
+command -v wmctrl >/dev/null 2>&1 && WMCTRL=1
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+switch_taiji() {
+    if [ -n "$SWAY" ]; then
+        sock="$(sway_socket || true)"
+        if [ -n "$sock" ]; then
+            SWAYSOCK="$sock" swaymsg -s "$sock" workspace taiji >/dev/null 2>&1 && return 0
+        fi
+        # Some session setups do not export SWAYSOCK; let swaymsg try the
+        # session environment before falling back to X11.
+        if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ]; then
+            swaymsg workspace taiji >/dev/null 2>&1 && return 0
+        fi
+    fi
+    if [ -n "$WMCTRL" ]; then
+        wmctrl -n 3 >/dev/null 2>&1 || true
+        wmctrl -s 0 >/dev/null 2>&1 || true
+        return 0
+    fi
+    printf '[taiji-return] unable to switch to taiji workspace\n' >&2
+    return 1
+}
+
+write_state() {
+    _fg="$1"; _st="$2"
+    tmp="$STATE_FILE.tmp.$$"
+    {
+        printf 'foreground=%s\n' "$_fg"
+        printf 'app_id=%s\n' "$APP_ID"
+        printf 'app_state=%s\n' "$_st"
+        printf 'on_return=%s\n' "$ON_RETURN"
+        printf 'pid=%s\n' "$PID"
+        printf 'pgid=%s\n' "$PGID"
+    } > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+write_return_request() {
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '1\n' > "$STATE_DIR/return_request" 2>/dev/null || true
+}
+
+capture_preview() {
+    SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+    CAPTURE="${TAIJI_CAPTURE:-}"
+    if [ -z "$CAPTURE" ]; then
+        if [ -x "$SELF_DIR/taiji-capture" ]; then
+            CAPTURE="$SELF_DIR/taiji-capture"
+        else
+            CAPTURE=/usr/libexec/taiji/taiji-capture
+        fi
+    fi
+    [ -x "$CAPTURE" ] || return 0
+    mkdir -p "$STATE_DIR/logs" 2>/dev/null || true
+    "$CAPTURE" >>"$STATE_DIR/logs/overview.log" 2>&1 || true
+}
+
+# Cache a preview before the window is hidden or paused, so the overview has
+# something to show even when it is opened from Taiji later.
+capture_preview
+
+case "$FG" in
+    app|music) ;;
+    *) [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+       switch_taiji; focus_taiji; write_return_request; exit 0 ;;
+esac
+
+TASK_FILE="$(task_find "$APP_ID" || true)"
+
+case "$ON_RETURN" in
+    close)
+        [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null && kill -TERM "-$PGID" 2>/dev/null || true
+        sleep 2
+        [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null && kill -KILL "-$PGID" 2>/dev/null || true
+        [ -n "$TASK_FILE" ] && rm -f "$TASK_FILE" 2>/dev/null || true
+        write_state taiji closed
+        ;;
+    run)
+        [ -n "$TASK_FILE" ] && task_set "$TASK_FILE" state background || true
+        write_state taiji background
+        ;;
+    *)
+        [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null && kill -STOP "-$PGID" 2>/dev/null || true
+        [ -n "$TASK_FILE" ] && task_set "$TASK_FILE" state paused || true
+        write_state taiji paused
+        ;;
+esac
+[ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+switch_taiji
+focus_taiji
+write_return_request

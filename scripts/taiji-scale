@@ -1,0 +1,76 @@
+#!/bin/sh
+# Temporarily scale the sway output while an external app is foreground.
+# Usage: taiji-scale app | taiji
+set -u
+
+ACTION="${1:-}"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+SCALE_FILE="$STATE_DIR/app_scale"
+SCALED_FILE="$STATE_DIR/output_scaled"
+BASE_FILE="$STATE_DIR/output_base_scale"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+# The systemd user hotkey service may start outside the session environment,
+# so do not require TAIJI_SESSION_MODE here. Finding a sway IPC socket is the
+# real capability check.
+[ "${TAIJI_SESSION_MODE:-}" = "x11" ] && exit 0
+command -v swaymsg >/dev/null 2>&1 || exit 1
+command -v jq >/dev/null 2>&1 || exit 1
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+SOCK="$(sway_socket || true)"
+[ -n "$SOCK" ] || exit 1
+sway() { SWAYSOCK="$SOCK" swaymsg "$@" >/dev/null 2>&1; }
+
+case "$ACTION" in
+    app)
+        factor="$(cat "$SCALE_FILE" 2>/dev/null || echo 1.00)"
+        case "$factor" in
+            1.25|1.5|1.50|1.75|2|2.00) ;;
+            *) exit 0 ;;
+        esac
+        [ "$factor" = "2" ] && factor="2.00"
+        [ "$factor" = "1.5" ] && factor="1.50"
+
+        json="$(SWAYSOCK="$SOCK" swaymsg -t get_outputs -r 2>/dev/null)" || exit 1
+        name="$(printf '%s' "$json" | jq -r '([.[] | select(.focused == true)][0] // .[0]).name // empty')"
+        [ -n "$name" ] || exit 1
+
+        if [ ! -f "$SCALED_FILE" ]; then
+            # The kiosk session always owns a 1.0 base scale. Never trust a
+            # stale high scale left behind by an abnormal exit.
+            printf '%s\n' "$name" > "$SCALED_FILE.tmp"
+            printf '1.00\n' > "$BASE_FILE.tmp"
+            mv -f "$SCALED_FILE.tmp" "$SCALED_FILE"
+            mv -f "$BASE_FILE.tmp" "$BASE_FILE"
+        fi
+        if ! sway output "$name" scale "$factor"; then
+            rm -f "$SCALED_FILE" "$BASE_FILE"
+            exit 1
+        fi
+        ;;
+    taiji)
+        [ -f "$SCALED_FILE" ] || exit 0
+        name="$(cat "$SCALED_FILE" 2>/dev/null || true)"
+        [ -n "$name" ] || { rm -f "$SCALED_FILE" "$BASE_FILE"; exit 0; }
+        sway output "$name" scale 1.00 || true
+        rm -f "$SCALED_FILE" "$BASE_FILE"
+        ;;
+    *)
+        exit 2
+        ;;
+esac
+exit 0

@@ -1,0 +1,282 @@
+#!/bin/sh
+# Capture a thumbnail of the currently focused window.
+# usage: taiji-capture [--self] [pid [x y w h]]
+#
+# Capture priority:
+#   Wayland session -> grim
+#   X11 session     -> xwd + ImageMagick convert
+#   framebuffer     -> /dev/fb0 (works for both, also when the compositor tools
+#                      are unavailable)
+#
+# --self captures Taiji itself (used before launching an app) and stores the
+# image as thumbs/taiji.png|bmp.
+set -u
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+LOG_DIR="$STATE_DIR/logs"
+THUMB_DIR="$STATE_DIR/thumbs"
+mkdir -p "$THUMB_DIR" "$LOG_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" "$THUMB_DIR" "$LOG_DIR" 2>/dev/null || true
+LOG="$LOG_DIR/overview.log"
+
+log() {
+    printf '[%s] %s\n' "$(date '+%H:%M:%S' 2>/dev/null || echo '--:--:--')" "$*" >>"$LOG" 2>/dev/null || true
+}
+
+SELF=0
+if [ "${1:-}" = "--self" ]; then
+    SELF=1
+    shift
+fi
+
+PID="${1:-}"
+FX="${2:-}"; FY="${3:-}"; FW="${4:-}"; FH="${5:-}"
+APP_ID=""
+BASE=""
+
+set_base() {
+    if [ "$SELF" = 1 ]; then
+        BASE="taiji"
+    else
+        BASE="thumb-$PID"
+    fi
+}
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+discover_wayland_display() {
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        return 0
+    fi
+    RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null || echo 0)}"
+    for s in "$RT"/wayland-*; do
+        [ -S "$s" ] || continue
+        case "$s" in *.lock) continue ;; esac
+        WAYLAND_DISPLAY=${s##*/}
+        export WAYLAND_DISPLAY
+        return 0
+    done
+    return 1
+}
+
+discover_sway_focus() {
+    command -v swaymsg >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    SOCK="$(sway_socket || true)"
+    if [ -n "$SOCK" ]; then
+        TREE=$(SWAYSOCK="$SOCK" swaymsg -s "$SOCK" -t get_tree 2>/dev/null || true)
+    else
+        TREE=$(swaymsg -t get_tree 2>/dev/null || true)
+    fi
+    [ -n "$TREE" ] || return 1
+    INFO=$(printf '%s\n' "$TREE" | jq -r '
+        .. | objects
+        | select(.focused? == true)
+        | select(.pid? != null and .pid > 0)
+        | [.pid, (.app_id // .window_properties.class // "-"),
+           (.rect.x // 0), (.rect.y // 0),
+           (.rect.width // 0), (.rect.height // 0)]
+        | @tsv' 2>/dev/null | head -n 1)
+    [ -n "$INFO" ] || return 1
+
+    OLDIFS=$IFS
+    IFS="$(printf '\t')"
+    set -- $INFO
+    IFS=$OLDIFS
+    [ "$#" -ge 6 ] || return 1
+    PID="$1"; APP_ID="$2"
+    FX="$3"; FY="$4"; FW="$5"; FH="$6"
+    return 0
+}
+
+is_wayland_session() {
+    [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+    [ -n "$(sway_socket || true)" ] && return 0
+    [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && return 0
+    return 1
+}
+
+is_x11_session() {
+    [ -n "${DISPLAY:-}" ] && return 0
+    [ "${TAIJI_SESSION_MODE:-}" = "x11" ] && return 0
+    return 1
+}
+
+pgrp_of() {
+    [ -r "/proc/$1/stat" ] || return 1
+    awk '{ sub(/^[0-9]+ \([^)]*\) /, ""); print $3 }' "/proc/$1/stat" 2>/dev/null
+}
+
+drop_png() { rm -f "$THUMB_DIR/$BASE.png" 2>/dev/null || true; }
+drop_bmp() { rm -f "$THUMB_DIR/$BASE.bmp" 2>/dev/null || true; }
+
+# Managed tasks are tracked by their process group, so store a second copy
+# under the group id as well.  External windows keep their pid-based copy.
+mirror_by_pgrp() {
+    [ "$SELF" = 1 ] && return 0
+    pgrp=$(pgrp_of "$PID" || true)
+    [ -n "$pgrp" ] || return 0
+    [ "$pgrp" != "$PID" ] || return 0
+    case "$1" in
+        png)
+            cp "$THUMB_DIR/$BASE.png" "$THUMB_DIR/thumb-$pgrp.png" 2>/dev/null || true
+            chmod 600 "$THUMB_DIR/thumb-$pgrp.png" 2>/dev/null || true
+            ;;
+        bmp)
+            cp "$THUMB_DIR/$BASE.bmp" "$THUMB_DIR/thumb-$pgrp.bmp" 2>/dev/null || true
+            chmod 600 "$THUMB_DIR/thumb-$pgrp.bmp" 2>/dev/null || true
+            ;;
+    esac
+}
+
+try_grim() {
+    command -v grim >/dev/null 2>&1 || return 1
+    discover_wayland_display || {
+        log "grim skipped: no WAYLAND_DISPLAY"
+        return 1
+    }
+
+    PNG="$THUMB_DIR/$BASE.png"
+    TMP="$PNG.tmp.$$"
+    if [ -n "$FW" ] && [ "$FW" -gt 0 ] 2>/dev/null && \
+       [ -n "$FH" ] && [ "$FH" -gt 0 ] 2>/dev/null; then
+        grim -g "$FX,$FY ${FW}x${FH}" -s 0.35 "$TMP" 2>>"$LOG" || \
+            grim -g "$FX,$FY ${FW}x${FH}" "$TMP" 2>>"$LOG" || true
+    else
+        grim -s 0.35 "$TMP" 2>>"$LOG" || grim "$TMP" 2>>"$LOG" || true
+    fi
+    if [ -s "$TMP" ]; then
+        chmod 600 "$TMP" 2>/dev/null || true
+        mv -f "$TMP" "$PNG" 2>/dev/null || true
+        drop_bmp
+        log "grim $BASE (pid=${PID:-?}, WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
+        [ "$SELF" = 1 ] || printf '%s\n' "$PID"
+        return 0
+    fi
+    rm -f "$TMP" 2>/dev/null || true
+    log "grim failed for $BASE (pid=${PID:-?}, WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset})"
+    return 1
+}
+
+try_xwd() {
+    command -v xwd >/dev/null 2>&1 || return 1
+    command -v convert >/dev/null 2>&1 || return 1
+    command -v xprop >/dev/null 2>&1 || return 1
+    [ -n "${DISPLAY:-}" ] || return 1
+
+    WID=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | sed -n 's/.*# //p' | head -n 1)
+    case "$WID" in ''|0x0|0) return 1 ;; esac
+    XPID=$(xprop -id "$WID" _NET_WM_PID 2>/dev/null | sed -n 's/.*= //p' | head -n 1)
+    case "$XPID" in
+        ''|*[!0-9]*) : ;;
+        *)
+            if [ "$XPID" -gt 0 ] 2>/dev/null; then
+                PID="$XPID"
+                if [ "$SELF" = 0 ] && \
+                   [ "$(cat "/proc/$PID/comm" 2>/dev/null)" = "taiji" ]; then
+                    return 1
+                fi
+            fi
+            ;;
+    esac
+    [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null || return 1
+    set_base
+
+    PNG="$THUMB_DIR/$BASE.png"
+    TMP="$PNG.tmp.$$"
+    XWD="$THUMB_DIR/.capture-$$.xwd"
+    if xwd -silent -id "$WID" -out "$XWD" 2>>"$LOG" && [ -s "$XWD" ]; then
+        if convert "$XWD" -resize 480x "$TMP" 2>>"$LOG" && [ -s "$TMP" ]; then
+            chmod 600 "$TMP" 2>/dev/null || true
+            mv -f "$TMP" "$PNG" 2>/dev/null || true
+            rm -f "$XWD" 2>/dev/null || true
+            drop_bmp
+            log "xwd $BASE (pid=$PID)"
+            mirror_by_pgrp png
+            [ "$SELF" = 1 ] || printf '%s\n' "$PID"
+            return 0
+        fi
+    fi
+    rm -f "$TMP" "$XWD" 2>/dev/null || true
+    log "xwd failed for $BASE (pid=${PID:-?})"
+    return 1
+}
+
+try_fb() {
+    FBCAP="${TAIJI_FBCAP:-}"
+    if [ -z "$FBCAP" ]; then
+        SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+        if [ -x "$SELF_DIR/taiji-fbcap" ]; then
+            FBCAP="$SELF_DIR/taiji-fbcap"
+        else
+            FBCAP=/usr/libexec/taiji/taiji-fbcap
+        fi
+    fi
+    [ -x "$FBCAP" ] || return 1
+    [ -r "${TAIJI_FB:-/dev/fb0}" ] || return 1
+
+    BMP="$THUMB_DIR/$BASE.bmp"
+    TMP="$BMP.tmp.$$"
+    rm -f "$TMP" 2>/dev/null || true
+    if "$FBCAP" "$TMP" 480 2>>"$LOG"; then
+        chmod 600 "$TMP" 2>/dev/null || true
+        mv -f "$TMP" "$BMP" 2>/dev/null || true
+        drop_png
+        log "fb $BASE (pid=${PID:-?})"
+        mirror_by_pgrp bmp
+        [ "$SELF" = 1 ] || printf '%s\n' "$PID"
+        return 0
+    fi
+    rm -f "$TMP" 2>/dev/null || true
+    log "fb capture failed for $BASE (pid=${PID:-?})"
+    return 1
+}
+
+# ── main ────────────────────────────────────────────────────────────────────
+
+if [ -z "$PID" ] && is_wayland_session; then
+    discover_sway_focus || true
+fi
+
+if [ -n "$PID" ]; then
+    case "$PID" in *[!0-9]*) PID="" ;; esac
+fi
+set_base
+
+if [ "$SELF" = 0 ] && [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
+    if [ "$(cat "/proc/$PID/comm" 2>/dev/null)" = "taiji" ]; then
+        exit 0
+    fi
+    case "$APP_ID" in
+        *taiji*|*Taiji*) exit 0 ;;
+    esac
+fi
+
+if is_wayland_session; then
+    if [ "$SELF" = 0 ]; then
+        [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null || exit 0
+    fi
+    try_grim && exit 0
+elif is_x11_session; then
+    try_xwd && exit 0
+    if [ "$SELF" = 0 ]; then
+        [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null || exit 0
+    fi
+fi
+
+# Framebuffer is the last resort for both session types.
+try_fb && exit 0
+
+exit 1

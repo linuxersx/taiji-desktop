@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.taiji
+Exec=/usr/libexec/taiji/taiji-files-portal

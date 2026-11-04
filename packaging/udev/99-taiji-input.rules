@@ -1,0 +1,6 @@
+# Let the active seat user read controller/input events without root.
+# The hotkey daemon only listens, it never grabs the device.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
+
+# Let the seat user read the framebuffer for multitask thumbnails.
+KERNEL=="fb0", SUBSYSTEM=="graphics", TAG+="uaccess"

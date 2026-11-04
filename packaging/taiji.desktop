@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Taiji
+Name[zh_CN]=太极
+Comment=Retro game library frontend built with LVGL and SDL2
+Comment[zh_CN]=用 LVGL 与 SDL2 重写的复古游戏库前端
+Exec=taiji
+Icon=taiji
+Terminal=false
+Categories=Game;Emulator;
+Keywords=retro;emulator;game;library;taiji;

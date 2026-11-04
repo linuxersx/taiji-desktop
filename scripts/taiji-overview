@@ -1,0 +1,154 @@
+#!/bin/sh
+# Capture the current foreground window and ask Taiji to open the multitask
+# overview. Triggered by a long press of the controller Guide/Home button.
+set -u
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-$SELF_DIR/taiji-scale}"
+[ -x "$SCALE_HELPER" ] || SCALE_HELPER="/usr/libexec/taiji/taiji-scale"
+THUMB_DIR="$STATE_DIR/thumbs"
+mkdir -p "$STATE_DIR" "$THUMB_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" "$THUMB_DIR" 2>/dev/null || true
+
+FG=""; APP_ID=""; APP_STATE=""; ON_RETURN=""; PID=""; PGID=""
+if [ -f "$STATE_FILE" ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in
+            foreground) FG="$v" ;;
+            app_id) APP_ID="$v" ;;
+            app_state) APP_STATE="$v" ;;
+            on_return) ON_RETURN="$v" ;;
+            pid) PID="$v" ;;
+            pgid) PGID="$v" ;;
+        esac
+    done < "$STATE_FILE"
+fi
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+SOCK="$(sway_socket || true)"
+
+swaymsg_run() {
+    if [ -n "$SOCK" ]; then
+        SWAYSOCK="$SOCK" swaymsg -s "$SOCK" "$@" >/dev/null 2>&1 || true
+    else
+        swaymsg "$@" >/dev/null 2>&1 || true
+    fi
+}
+
+write_state() {
+    _fg="$1"; _st="$2"
+    tmp="$STATE_FILE.tmp.$$"
+    {
+        printf 'foreground=%s\n' "$_fg"
+        printf 'app_id=%s\n' "$APP_ID"
+        printf 'app_state=%s\n' "$_st"
+        printf 'on_return=%s\n' "$ON_RETURN"
+        printf 'pid=%s\n' "$PID"
+        printf 'pgid=%s\n' "$PGID"
+    } > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+# 1. Remember and screenshot the focused window before changing workspaces.
+FOCUS_PID=0
+if command -v swaymsg >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    if [ -n "$SOCK" ]; then
+        TREE=$(SWAYSOCK="$SOCK" swaymsg -s "$SOCK" -t get_tree 2>/dev/null || true)
+    else
+        TREE=$(swaymsg -t get_tree 2>/dev/null || true)
+    fi
+    INFO=$(printf '%s\n' "$TREE" | jq -r '
+        .. | objects
+        | select(.focused? == true)
+        | select(.pid? != null and .pid > 0)
+        | [.pid, (.app_id // .window_properties.class // "-"),
+           (.rect.x // 0), (.rect.y // 0),
+           (.rect.width // 0), (.rect.height // 0)]
+        | @tsv' 2>/dev/null | head -n 1)
+    if [ -n "$INFO" ]; then
+        OLDIFS=$IFS
+        IFS="$(printf '\t')"
+        set -- $INFO
+        IFS=$OLDIFS
+        if [ "$#" -ge 6 ]; then
+            FOCUS_PID="$1"
+            FOCUS_APP="$2"
+            FX="$3"; FY="$4"; FW="$5"; FH="$6"
+            case "$FOCUS_APP" in
+                *taiji*|*Taiji*) FOCUS_PID=0 ;;
+            esac
+            if [ "$FOCUS_PID" -gt 0 ] 2>/dev/null && \
+               [ "$(cat "/proc/$FOCUS_PID/comm" 2>/dev/null)" = "taiji" ]; then
+                FOCUS_PID=0
+            fi
+
+        fi
+    fi
+fi
+
+# Capture while the target window is still visible.  When sway is not
+# available (X11 fallback) taiji-capture resolves the focus itself.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+CAPTURE="${TAIJI_CAPTURE:-}"
+if [ -z "$CAPTURE" ]; then
+    if [ -x "$SELF_DIR/taiji-capture" ]; then
+        CAPTURE="$SELF_DIR/taiji-capture"
+    else
+        CAPTURE=/usr/libexec/taiji/taiji-capture
+    fi
+fi
+if [ -x "$CAPTURE" ]; then
+    if [ "$FOCUS_PID" -gt 0 ] 2>/dev/null; then
+        CAP_PID=$("$CAPTURE" "$FOCUS_PID" "$FX" "$FY" "$FW" "$FH" || true)
+    else
+        CAP_PID=$("$CAPTURE" || true)
+    fi
+    case "$CAP_PID" in
+        ''|*[!0-9]*) : ;;
+        *) [ "$FOCUS_PID" -gt 0 ] 2>/dev/null || FOCUS_PID="$CAP_PID" ;;
+    esac
+fi
+
+# 0 means "no external window was focused" (Taiji itself, or unknown).
+printf '%s\n' "$FOCUS_PID" > "$STATE_DIR/overview_focus_pid" 2>/dev/null || true
+
+# 2. Pause the managed foreground app. Close-on-return still keeps it alive for
+#    the overview, so it can be resumed from a card.
+if [ "$FG" = "app" ] || [ "$FG" = "music" ]; then
+    TASK_FILE="$(task_find "$APP_ID" || true)"
+    if [ "$ON_RETURN" = "run" ]; then
+        [ -n "$TASK_FILE" ] && task_set "$TASK_FILE" state background || true
+        write_state taiji background
+    else
+        if [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null; then
+            kill -STOP "-$PGID" 2>/dev/null || true
+        fi
+        [ -n "$TASK_FILE" ] && task_set "$TASK_FILE" state paused || true
+        write_state taiji paused
+    fi
+fi
+
+# 3. Restore the output scale before Taiji becomes visible, then switch.
+[ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+swaymsg_run workspace taiji
+focus_taiji
+
+printf '1\n' > "$STATE_DIR/return_request" 2>/dev/null || true
+printf '1\n' > "$STATE_DIR/overview_request" 2>/dev/null || true

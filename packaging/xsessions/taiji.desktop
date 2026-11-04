@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Taiji X11
+Name[zh_CN]=太极（X11）
+Comment=Taiji game library and app launcher (X11)
+Comment[zh_CN]=太极游戏库与应用启动器（X11）
+Exec=/usr/libexec/taiji/taiji-session
+TryExec=/usr/libexec/taiji/taiji-session
+Icon=taiji
+DesktopNames=Taiji

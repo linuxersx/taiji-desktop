@@ -1,0 +1,218 @@
+#!/bin/sh
+# Print the multitask list as TSV for the Taiji overview.
+# Columns: kind id title subtitle thumbnail con_id pid focused
+set -u
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+THUMB_DIR="$STATE_DIR/thumbs"
+FOCUS_PID_FILE="$STATE_DIR/overview_focus_pid"
+TAIJI_PID="${PPID:-0}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+
+FG=""; APP_ID=""; APP_STATE=""; ON_RETURN=""; PID=""; PGID=""
+if [ -f "$STATE_FILE" ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in
+            foreground) FG="$v" ;;
+            app_id) APP_ID="$v" ;;
+            app_state) APP_STATE="$v" ;;
+            on_return) ON_RETURN="$v" ;;
+            pid) PID="$v" ;;
+            pgid) PGID="$v" ;;
+        esac
+    done < "$STATE_FILE"
+fi
+
+FOCUS_PID=0
+if [ -f "$FOCUS_PID_FILE" ]; then
+    FOCUS_PID=$(cat "$FOCUS_PID_FILE" 2>/dev/null || echo 0)
+fi
+case "$FOCUS_PID" in ''|*[!0-9]*) FOCUS_PID=0 ;; esac
+
+sanitize() {
+    # Collapse tabs/newlines so the TSV stays parseable.
+    tr '\t\r\n' '   '
+}
+
+field() {
+    printf '%s' "$1" | sanitize
+}
+
+state_label() {
+    case "$1" in
+        foreground) printf '前台' ;;
+        paused) printf '已暂停' ;;
+        background) printf '后台运行' ;;
+        launching) printf '启动中' ;;
+        failed) printf '启动失败' ;;
+        *) printf '已暂停' ;;
+    esac
+}
+
+pgrp_of() {
+    [ -r "/proc/$1/stat" ] || return 1
+    awk '{ sub(/^[0-9]+ \([^)]*\) /, ""); print $3 }' "/proc/$1/stat" 2>/dev/null
+}
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+# Taiji itself is always the first card.
+TAIJI_THUMB="$THUMB_DIR/taiji.bmp"
+[ -f "$TAIJI_THUMB" ] || TAIJI_THUMB="$THUMB_DIR/taiji.png"
+[ -f "$TAIJI_THUMB" ] || TAIJI_THUMB=""
+printf 'taiji\ttaiji\t太极\t主界面\t%s\t0\t0\t0\n' "$TAIJI_THUMB"
+
+SEEN=$(mktemp "${TMPDIR:-/tmp}/taiji-seen.XXXXXX" 2>/dev/null || echo "$STATE_DIR/.seen.$$")
+MATCH_FILE="$SEEN.matched"
+TASK_PGIDS="$SEEN.pgids"
+: > "$SEEN" 2>/dev/null || true
+: > "$MATCH_FILE" 2>/dev/null || true
+: > "$TASK_PGIDS" 2>/dev/null || true
+
+# Managed apps come from per-task files, so several can stay paused.
+for f in "$STATE_DIR"/tasks/*.task; do
+    [ -f "$f" ] || continue
+    t_pid=$(task_get "$f" pid)
+    if ! pid_alive "$t_pid"; then
+        rm -f "$f" 2>/dev/null || true
+        continue
+    fi
+    t_id=$(task_get "$f" id)
+    t_name=$(task_get "$f" name)
+    t_pgid=$(task_get "$f" pgid)
+    t_state=$(task_get "$f" state)
+    [ -n "$t_name" ] || t_name="$t_id"
+    focused=0
+    if [ "$FOCUS_PID" -gt 0 ] 2>/dev/null; then
+        [ "$FOCUS_PID" = "$t_pid" ] && focused=1
+        if [ -n "$t_pgid" ] && [ "$t_pgid" -gt 0 ] 2>/dev/null; then
+            fpgrp=$(pgrp_of "$FOCUS_PID" || true)
+            [ "$fpgrp" = "$t_pgid" ] && focused=1
+        fi
+    fi
+    [ "$FG" = "app" ] && [ "$APP_ID" = "$t_id" ] && focused=1
+
+    t_thumb=""
+    for key in "$t_pgid" "$t_pid"; do
+        [ -n "$key" ] || continue
+        [ -f "$THUMB_DIR/thumb-$key.bmp" ] && { t_thumb="$THUMB_DIR/thumb-$key.bmp"; break; }
+        [ -f "$THUMB_DIR/thumb-$key.png" ] && { t_thumb="$THUMB_DIR/thumb-$key.png"; break; }
+    done
+    printf 'app\t%s\t%s\t%s\t%s\t0\t%s\t%s\n' \
+        "$(field "$t_id")" "$(field "$t_name")" "$(state_label "$t_state")" \
+        "$t_thumb" "$t_pid" "$focused"
+    printf '%s\n' "$t_pid" >> "$SEEN" 2>/dev/null || true
+    [ -n "$t_pgid" ] && printf '%s\n' "$t_pgid" >> "$TASK_PGIDS" 2>/dev/null || true
+done
+
+if command -v swaymsg >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    SOCK="$(sway_socket || true)"
+    if [ -n "$SOCK" ]; then
+        TREE=$(SWAYSOCK="$SOCK" swaymsg -s "$SOCK" -t get_tree 2>/dev/null || true)
+    else
+        TREE=$(swaymsg -t get_tree 2>/dev/null || true)
+    fi
+
+    if [ -n "$TREE" ]; then
+        printf '%s\n' "$TREE" | jq -r '
+            .. | objects
+            | select(.type? == "con" or .type? == "floating_con")
+            | select(.pid? != null and .pid > 0)
+            | select((.name? // "") != "")
+            | [(.id // 0), .pid, (.app_id // .window_properties.class // "-"), .name]
+            | @tsv' 2>/dev/null | \
+        while IFS="$(printf '\t')" read -r con pid appid title; do
+            case "$appid" in
+                *taiji*|*Taiji*) continue ;;
+            esac
+            [ -n "$title" ] || title="$appid"
+            [ -n "$title" ] || title="任务"
+            case "$title" in
+                太极) continue ;;
+            esac
+            [ "$pid" = "$TAIJI_PID" ] && continue
+            [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "taiji" ] && continue
+            # Already listed as a managed task above.
+            if [ -s "$SEEN" ] && grep -qx "$pid" "$SEEN" 2>/dev/null; then
+                continue
+            fi
+            wpgrp=$(pgrp_of "$pid" || true)
+            if [ -n "$wpgrp" ] && [ -s "$TASK_PGIDS" ] && \
+               grep -qx "$wpgrp" "$TASK_PGIDS" 2>/dev/null; then
+                continue
+            fi
+
+            # Skip duplicate toplevels that share one process.
+            if [ -f "$SEEN" ] && grep -qx "$pid" "$SEEN" 2>/dev/null; then
+                continue
+            fi
+            [ -f "$SEEN" ] && printf '%s\n' "$pid" >> "$SEEN"
+
+            focused=0
+            [ "$pid" = "$FOCUS_PID" ] 2>/dev/null && focused=1
+
+            managed=0
+            if [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null; then
+                pgrp=$(pgrp_of "$pid" || true)
+                if [ "$pid" = "$PID" ] || [ "$pid" = "$PGID" ] || \
+                   { [ -n "$pgrp" ] && [ "$pgrp" = "$PGID" ]; }; then
+                    managed=1
+                fi
+            fi
+
+            thumb="$THUMB_DIR/thumb-$pid.bmp"
+            [ -f "$thumb" ] || thumb="$THUMB_DIR/thumb-$pid.png"
+            [ -f "$thumb" ] || thumb=""
+
+            if [ "$managed" = "1" ] && [ -n "$APP_ID" ]; then
+                printf '1\n' > "$MATCH_FILE" 2>/dev/null || true
+                [ "$FG" = "app" ] && focused=1
+                printf 'app\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$(field "$APP_ID")" "$(field "$title")" \
+                    "$(state_label "$APP_STATE")" "$thumb" "$con" "$pid" "$focused"
+            else
+                sub="$(field "$appid")"
+                [ -n "$sub" ] || sub="外部窗口"
+                printf 'external\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "ext:$con" "$(field "$title")" "$sub" "$thumb" \
+                    "$con" "$pid" "$focused"
+            fi
+        done
+    fi
+fi
+
+# A paused app may not expose a window any more; keep it in the list.
+MATCHED=0
+[ -s "$MATCH_FILE" ] && MATCHED=1
+if task_find "$APP_ID" >/dev/null 2>&1; then
+    MATCHED=1
+fi
+
+if [ "$MATCHED" = "0" ] && [ -n "$APP_ID" ] && [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
+    if kill -0 "$PID" 2>/dev/null; then
+        thumb="$THUMB_DIR/thumb-$PID.bmp"
+        [ -f "$thumb" ] || thumb="$THUMB_DIR/thumb-$PID.png"
+        [ -f "$thumb" ] || thumb=""
+        focused=0
+        [ "$FG" = "app" ] && focused=1
+        printf 'app\t%s\t%s\t%s\t%s\t0\t%s\t%s\n' \
+            "$(field "$APP_ID")" "$(field "$APP_ID")" \
+            "$(state_label "$APP_STATE")" "$thumb" "$PID" "$focused"
+    fi
+fi
+
+rm -f "$SEEN" "$MATCH_FILE" "$TASK_PGIDS" 2>/dev/null || true

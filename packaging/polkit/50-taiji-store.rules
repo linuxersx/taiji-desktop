@@ -1,0 +1,9 @@
+// Allow the active local session to run the Taiji store helper without a
+// password prompt. The helper validates operations and package names.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/libexec/taiji/taiji-store-helper" &&
+        subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

@@ -1,0 +1,13 @@
+[Unit]
+Description=Taiji USB MTP responder (current user's home)
+After=local-fs.target
+ConditionPathExists=/dev/usb-ffs/mtp/ep0
+# 由 armdeck-adbd 在带 MTP 启动时 systemctl start，默认不启用。
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/taiji/taiji-mtpd --ffs /dev/usb-ffs/mtp
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

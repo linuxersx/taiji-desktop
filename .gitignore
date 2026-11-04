@@ -1,0 +1,23 @@
+# Build output
+build/
+build-*/
+*.o
+*.a
+*.so
+*.so.*
+
+# Packages and archives
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.tar.gz
+*.tar.zst
+
+# Local snapshots and duplicated trees
+taiji-src/
+
+# Split into its own repository: https://github.com/linuxersx/armdeck-osk
+armdeck-osk/
+
+# macOS
+.DS_Store
+._*

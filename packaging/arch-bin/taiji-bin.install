@@ -1,0 +1,48 @@
+post_install() {
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=input || true
+  fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload systemd-logind >/dev/null 2>&1 || true
+  fi
+
+  cat <<'MSG'
+Taiji Desktop installed.
+
+Enable the display manager:
+  systemctl enable sddm
+
+Enable Wi-Fi management:
+  systemctl enable --now NetworkManager
+
+Enable Bluetooth management:
+  systemctl enable --now bluetooth
+
+Enable CPU performance profiles (optional):
+  systemctl enable --now power-profiles-daemon
+
+Enable the controller Guide/Home helper:
+  systemctl --user enable --now taiji-hotkeyd
+
+The hotkey daemon needs read access to /dev/input/event*. The installed udev
+rule grants this to the active seat user. A relogin may be required.
+Long-press the power key to open the power menu.
+MSG
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+  fi
+}

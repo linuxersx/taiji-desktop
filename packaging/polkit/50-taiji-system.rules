@@ -1,0 +1,9 @@
+// Allow the active local session to change time zone and locale without a
+// password prompt. Taiji is a single-user kiosk frontend.
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.timedate1.set-timezone" ||
+         action.id == "org.freedesktop.locale1.set-locale") &&
+        subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

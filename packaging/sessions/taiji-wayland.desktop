@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Taiji Wayland
+Name[zh_CN]=太极（Wayland）
+Comment=Taiji game library and app launcher (Wayland)
+Comment[zh_CN]=太极游戏库与应用启动器（Wayland）
+Exec=/usr/libexec/taiji/taiji-wayland-session
+TryExec=/usr/libexec/taiji/taiji-wayland-session
+Icon=taiji
+DesktopNames=Taiji

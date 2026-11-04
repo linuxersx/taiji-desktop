@@ -1,0 +1,13 @@
+[Unit]
+Description=Taiji controller Guide/Home hotkey daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/taiji/taiji-hotkeyd
+Restart=on-failure
+RestartSec=2
+Environment=TAIJI_RETURN_CMD=/usr/libexec/taiji/taiji-return
+
+[Install]
+WantedBy=default.target

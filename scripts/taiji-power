@@ -1,0 +1,30 @@
+#!/bin/sh
+# Power actions used by the long-press power menu.
+set -u
+action="${1:-}"
+
+loginctl_cmd() {
+    if command -v loginctl >/dev/null 2>&1; then
+        loginctl "$@" 2>/dev/null && exit 0
+    fi
+}
+
+case "$action" in
+    sleep)
+        loginctl_cmd suspend
+        command -v systemctl >/dev/null 2>&1 && systemctl suspend
+        ;;
+    reboot)
+        command -v systemctl >/dev/null 2>&1 && systemctl reboot
+        ;;
+    poweroff)
+        command -v systemctl >/dev/null 2>&1 && systemctl poweroff
+        ;;
+    logout)
+        if [ -n "${XDG_SESSION_ID:-}" ]; then
+            loginctl terminate-session "$XDG_SESSION_ID" 2>/dev/null && exit 0
+        fi
+        command -v systemctl >/dev/null 2>&1 && systemctl --user exit
+        ;;
+esac
+exit 1

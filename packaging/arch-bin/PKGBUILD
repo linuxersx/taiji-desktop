@@ -1,0 +1,74 @@
+# Maintainer: Taiji Desktop
+# Prebuilt aarch64 payload. Build the source package if you need x86_64.
+pkgname=taiji-bin
+pkgver=1.0.0
+pkgrel=153
+pkgdesc="Taiji retro game library, app launcher and kiosk frontend (prebuilt aarch64)"
+arch=('aarch64')
+license=('GPL-3.0-or-later')
+provides=('taiji')
+conflicts=('taiji')
+depends=(
+  'sdl2'
+  'sddm'
+  'pacman'
+  'sway'
+  'weston'
+  'xdg-terminal-exec'
+  'armdeck-usb-mtp'
+  'flatpak'
+  'xorg-xwayland'
+  'xorg-server'
+  'networkmanager'
+  'power-profiles-daemon'
+  'pipewire'
+  'wireplumber'
+  'librsvg'
+  'polkit'
+  'qt6-declarative'
+  'qt6-imageformats'
+  'qt6-wayland'
+  'hicolor-icon-theme'
+  'papirus-icon-theme'
+  'archlinux-appstream-data'
+  'zlib'
+  'desktop-file-utils'
+  'xdg-utils'
+  'shared-mime-info'
+  'grim'
+  'jq'
+  'wayland'
+  'libx11'
+  'libxext'
+  'xorg-xprop'
+  'xorg-xwd'
+  'xorg-xrandr'
+  'xorg-xset'
+  'xorg-xsetroot'
+  'xorg-xrdb'
+  'libpng'
+  'glib2'
+  'xdg-desktop-portal'
+  'udisks2'
+  'gvfs'
+  'gvfs-smb'
+  '7zip'
+  'bluez'
+  'bluez-utils'
+)
+optdepends=(
+  'mesa: GPU drivers, including Panfrost'
+  'noto-fonts-cjk: Chinese fallback fonts for third-party apps'
+  'imagemagick: alternative SVG icon converter'
+  'evtest: controller and input debugging'
+  'joystick: joystick testing tools'
+  'armdeck-osk: external Wayland virtual keyboard'
+)
+backup=('etc/sddm.conf.d/taiji.conf')
+install=taiji-bin.install
+source=("taiji-$pkgver-$CARCH.tar.gz")
+sha256sums=('4614fb07783d3141e90453a2e1ab7794bb72cc13eba7aa33af26a4696b0432e0')
+
+package() {
+  cp -a "$srcdir/taiji-$pkgver-$CARCH/." "$pkgdir/"
+}

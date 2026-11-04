@@ -1,0 +1,169 @@
+#!/bin/sh
+# Shared helpers for Taiji managed tasks.  Source after STATE_DIR is set.
+
+TASKS_DIR="$STATE_DIR/tasks"
+MAX_TASKS="${TAIJI_MAX_PAUSED:-6}"
+
+pgrp_of() {
+    [ -r "/proc/$1/stat" ] || return 1
+    awk '{ sub(/^[0-9]+ \([^)]*\) /, ""); print $3 }' "/proc/$1/stat" 2>/dev/null
+}
+
+pid_alive() {
+    [ -n "$1" ] && [ "$1" -gt 0 ] 2>/dev/null && kill -0 "$1" 2>/dev/null
+}
+
+task_filename() {
+    safe=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/%s.task' "$TASKS_DIR" "$safe"
+}
+
+task_get() {
+    [ -f "$1" ] || return 1
+    sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
+}
+
+task_set() {
+    [ -f "$1" ] || return 1
+    tmp="$1.tmp.$$"
+    awk -v k="$2" -v v="$3" '
+        BEGIN { done = 0 }
+        index($0, k "=") == 1 { print k "=" v; done = 1; next }
+        { print }
+        END { if (!done) print k "=" v }
+    ' "$1" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$1" 2>/dev/null
+}
+
+task_find() {
+    [ -n "$1" ] || return 1
+    for f in "$TASKS_DIR"/*.task; do
+        [ -f "$f" ] || continue
+        [ "$(task_get "$f" id)" = "$1" ] && { printf '%s\n' "$f"; return 0; }
+    done
+    return 1
+}
+
+task_prune() {
+    for f in "$TASKS_DIR"/*.task; do
+        [ -f "$f" ] || continue
+        pid=$(task_get "$f" pid)
+        pid_alive "$pid" || rm -f "$f" 2>/dev/null || true
+    done
+}
+
+task_count() {
+    n=0
+    for f in "$TASKS_DIR"/*.task; do
+        [ -f "$f" ] || continue
+        pid=$(task_get "$f" pid)
+        pid_alive "$pid" && n=$((n + 1))
+    done
+    printf '%s\n' "$n"
+}
+
+task_free_workspace() {
+    used=" "
+    for f in "$TASKS_DIR"/*.task; do
+        [ -f "$f" ] || continue
+        ws=$(task_get "$f" workspace)
+        [ -n "$ws" ] && used="$used$ws "
+    done
+    i=1
+    while [ "$i" -le "$MAX_TASKS" ]; do
+        case "$used" in
+            *" taiji-app-$i "*) ;;
+            *) printf 'taiji-app-%s\n' "$i"; return 0 ;;
+        esac
+        i=$((i + 1))
+    done
+    printf 'app\n'
+}
+
+task_oldest_id() {
+    best=""
+    best_t=99999999999
+    for f in "$TASKS_DIR"/*.task; do
+        [ -f "$f" ] || continue
+        pid=$(task_get "$f" pid)
+        pid_alive "$pid" || continue
+        t=$(task_get "$f" started)
+        case "$t" in ''|*[!0-9]*) t=0 ;; esac
+        if [ "$t" -lt "$best_t" ] 2>/dev/null; then
+            best_t="$t"
+            best=$(task_get "$f" id)
+        fi
+    done
+    [ -n "$best" ] && printf '%s\n' "$best"
+}
+
+task_write() {
+    # task_write <file> <id> <name> <pid> <pgid> <workspace> <on_return> <state>
+    file="$1"; id="$2"; name="$3"; pid="$4"; pgid="$5"
+    ws="$6"; ret="$7"; state="$8"
+    mkdir -p "$TASKS_DIR" 2>/dev/null || true
+    chmod 700 "$STATE_DIR" "$TASKS_DIR" 2>/dev/null || true
+    tmp="$file.tmp.$$"
+    {
+        printf 'id=%s\n' "$id"
+        printf 'name=%s\n' "$name"
+        printf 'pid=%s\n' "$pid"
+        printf 'pgid=%s\n' "$pgid"
+        printf 'workspace=%s\n' "$ws"
+        printf 'on_return=%s\n' "$ret"
+        printf 'state=%s\n' "$state"
+        printf 'started=%s\n' "$(date +%s 2>/dev/null || echo 0)"
+    } > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" 2>/dev/null || true
+}
+
+focus_taiji() {
+    if command -v swaymsg >/dev/null 2>&1; then
+        sock="${SWAYSOCK:-}"
+        if [ -z "$sock" ] || [ ! -S "$sock" ]; then
+            sock=""
+            if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+                for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+                    [ -S "$s" ] || continue
+                    sock="$s"
+                    break
+                done
+            fi
+        fi
+        sway() {
+            if [ -n "$sock" ]; then
+                SWAYSOCK="$sock" swaymsg -s "$sock" "$@" >/dev/null 2>&1
+            else
+                swaymsg "$@" >/dev/null 2>&1
+            fi
+        }
+        sway workspace taiji
+        cid=""
+        if command -v jq >/dev/null 2>&1; then
+            if [ -n "$sock" ]; then
+                tree=$(SWAYSOCK="$sock" swaymsg -s "$sock" -t get_tree 2>/dev/null)
+            else
+                tree=$(swaymsg -t get_tree 2>/dev/null)
+            fi
+            cid=$(printf '%s\n' "$tree" | jq -r '
+                .. | objects
+                | select(.id? != null)
+                | select((((.app_id // "") | test("taiji"; "i")) or
+                          ((.window_properties.class // "") | test("taiji"; "i")) or
+                          ((.name // "") | test("^(太极|Taiji)"; "i"))))
+                | .id' 2>/dev/null | head -n 1)
+        fi
+        if [ -n "$cid" ]; then
+            sway "[con_id=$cid]" focus
+        else
+            sway "[app_id=taiji]" focus
+            sway "[class=taiji]" focus
+        fi
+        return 0
+    fi
+    if command -v wmctrl >/dev/null 2>&1; then
+        wmctrl -a "太极 / Taiji" >/dev/null 2>&1 || wmctrl -a "Taiji" >/dev/null 2>&1 || true
+    fi
+}

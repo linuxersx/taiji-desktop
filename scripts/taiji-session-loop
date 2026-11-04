@@ -1,0 +1,81 @@
+#!/bin/sh
+# Run Taiji and handle the optional handoff exit code.
+set -u
+
+TAIJI_BIN="${TAIJI_BIN:-/usr/bin/taiji}"
+PENDING="${XDG_RUNTIME_DIR:-/tmp}/taiji/handoff"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/taiji"
+mkdir -p "$LOG_DIR" "${XDG_RUNTIME_DIR:-/tmp}/taiji" 2>/dev/null || true
+
+SCALE_ENV="${XDG_RUNTIME_DIR:-/tmp}/taiji/scale"
+[ -f "$SCALE_ENV" ] && . "$SCALE_ENV"
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-/usr/libexec/taiji/taiji-scale}"
+[ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+
+# Volume OSD that can sit above fullscreen windows (layer-shell on Wayland,
+# override-redirect on X11).
+OSD="${TAIJI_OSD:-/usr/libexec/taiji/taiji-osd}"
+if [ -x "$OSD" ]; then
+    "$OSD" >>"$LOG_DIR/osd.log" 2>&1 &
+fi
+
+# Optional background music app. It runs on the music workspace and is not
+# killed when the foreground app changes.
+if [ -n "${TAIJI_BACKGROUND_CMD:-}" ] && [ "${TAIJI_BACKGROUND_STARTED:-0}" != "1" ]; then
+    TAIJI_BACKGROUND_STARTED=1
+    export TAIJI_BACKGROUND_STARTED
+    "$(dirname "$0")/taiji-run-background" music "$TAIJI_BACKGROUND_CMD" >/dev/null 2>&1 &
+    sleep 1
+fi
+
+RESUME_FILE="${XDG_RUNTIME_DIR:-/tmp}/taiji/resume_screen"
+if [ -f "$RESUME_FILE" ]; then
+    export TAIJI_START_SCREEN="$(cat "$RESUME_FILE" 2>/dev/null || echo apps)"
+fi
+
+# Wayland is the default client backend for the Wayland kiosk session.
+# Explicit SDL_VIDEODRIVER (for example x11) still wins for debugging.
+if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
+fi
+
+# The renderer default is opengles2 in config (and in main.c when unset).
+# Do not force SDL_RENDER_DRIVER here: the in-app renderer setting must keep
+# working.  Only use the environment when the caller explicitly sets it.
+
+# Start the persistent input-method/keyboard daemon with the session.
+OSK_DAEMON="${ARMDECK_OSK_DAEMON:-/usr/bin/armdeck-oskd}"
+OSK_INPUT="${ARMDECK_OSK_INPUT:-/usr/bin/armdeck-osk-input}"
+if [ -x "$OSK_DAEMON" ] || [ -x "$OSK_INPUT" ]; then
+    systemctl --user import-environment WAYLAND_DISPLAY XDG_SESSION_ID XDG_RUNTIME_DIR >/dev/null 2>&1 || true
+    if ! systemctl --user start armdeck-oskd.service armdeck-osk-input.service >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1; then
+        [ -x "$OSK_DAEMON" ] && "$OSK_DAEMON" >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1 &
+        [ -x "$OSK_INPUT" ] && "$OSK_INPUT" >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1 &
+    fi
+fi
+
+WAYLAND_FALLBACK_TRIED=0
+while :; do
+    START=$(date +%s 2>/dev/null || echo 0)
+    "$TAIJI_BIN" --kiosk >>"$LOG_DIR/session.log" 2>&1
+    CODE=$?
+    END=$(date +%s 2>/dev/null || echo 0)
+    ELAPSED=$((END - START))
+    [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+    if [ "$CODE" -eq 77 ] && [ -f "$PENDING" ]; then
+        /bin/sh "$PENDING" >>"$LOG_DIR/handoff.log" 2>&1 || true
+        rm -f "$PENDING"
+        continue
+    fi
+    # If the Wayland backend fails during early initialization, retry once
+    # through XWayland so a transient compositor/EGL failure cannot leave a
+    # permanently black kiosk session.
+    if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 77 ] && [ "$ELAPSED" -lt 5 ] &&
+       [ "${SDL_VIDEODRIVER:-}" = "wayland" ] && [ "$WAYLAND_FALLBACK_TRIED" = "0" ]; then
+        WAYLAND_FALLBACK_TRIED=1
+        export SDL_VIDEODRIVER=x11
+        echo "[taiji-session-loop] Wayland backend failed (code $CODE); retrying with XWayland" >>"$LOG_DIR/session.log"
+        continue
+    fi
+    exit "$CODE"
+done

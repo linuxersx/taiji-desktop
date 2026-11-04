@@ -1,0 +1,64 @@
+#!/bin/sh
+# Close a managed task by app id.
+# usage: taiji-close-task <app-id>
+set -u
+
+ID="${1:-}"
+[ -n "$ID" ] || exit 1
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+
+TASK_FILE="$(task_find "$ID" || true)"
+PID=""; PGID=""
+if [ -n "$TASK_FILE" ]; then
+    PID="$(task_get "$TASK_FILE" pid)"
+    PGID="$(task_get "$TASK_FILE" pgid)"
+else
+    while IFS='=' read -r k v; do
+        case "$k" in
+            app_id) [ "$v" = "$ID" ] || : ;;
+            pid) PID="$v" ;;
+            pgid) PGID="$v" ;;
+        esac
+    done < "$STATE_FILE" 2>/dev/null || true
+    cur=$(sed -n 's/^app_id=//p' "$STATE_FILE" 2>/dev/null | head -n 1)
+    if [ "$cur" != "$ID" ]; then
+        PID=""
+        PGID=""
+    fi
+fi
+
+if [ -n "$PID" ] && ! pid_alive "$PID"; then
+    PID=""
+    PGID=""
+fi
+
+if [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null; then
+    kill -TERM "-$PGID" 2>/dev/null || true
+    sleep 1
+    kill -KILL "-$PGID" 2>/dev/null || true
+elif [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
+    kill -TERM "$PID" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$PID" 2>/dev/null || true
+fi
+
+[ -n "$TASK_FILE" ] && rm -f "$TASK_FILE" 2>/dev/null || true
+
+cur=$(sed -n 's/^app_id=//p' "$STATE_FILE" 2>/dev/null | head -n 1)
+if [ "$cur" = "$ID" ]; then
+    tmp="$STATE_FILE.tmp.$$"
+    {
+        printf 'foreground=taiji\n'
+        printf 'app_id=%s\n' "$ID"
+        printf 'app_state=closed\n'
+        printf 'on_return=pause\n'
+        printf 'pid=0\n'
+        printf 'pgid=0\n'
+    } > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+fi
+exit 0

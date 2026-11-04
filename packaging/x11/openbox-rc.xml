@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance>
+    <strength>10</strength>
+    <screen_edge_strength>20</screen_edge_strength>
+  </resistance>
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>no</followMouse>
+    <focusLast>yes</focusLast>
+    <underMouse>no</underMouse>
+  </focus>
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+  </placement>
+  <desktops>
+    <number>3</number>
+    <firstdesk>1</firstdesk>
+    <names>
+      <name>taiji</name>
+      <name>app</name>
+      <name>music</name>
+    </names>
+  </desktops>
+  <keyboard>
+    <keybind key="Home">
+      <action name="Execute">
+        <execute>/usr/libexec/taiji/taiji-return</execute>
+      </action>
+    </keybind>
+    <keybind key="W-Home">
+      <action name="Execute">
+        <execute>/usr/libexec/taiji/taiji-return</execute>
+      </action>
+    </keybind>
+    <keybind key="XF86HomePage">
+      <action name="Execute">
+        <execute>/usr/libexec/taiji/taiji-return</execute>
+      </action>
+    </keybind>
+  </keyboard>
+  <applications>
+    <application class="*">
+      <decor>no</decor>
+    </application>
+  </applications>
+</openbox_config>

@@ -1,0 +1,21 @@
+# Taiji store featured applications.
+# One package name per line. Distributors can replace this file.
+retroarch
+ppsspp
+mgba-qt
+ares-emu
+snes9x
+desmume
+mednafen
+scummvm
+dosbox
+firefox
+chromium
+steam
+vlc
+mpv
+gimp
+krita
+code
+dolphin-emu
+mangohud

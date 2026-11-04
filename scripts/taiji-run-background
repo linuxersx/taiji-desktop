@@ -1,0 +1,44 @@
+#!/bin/sh
+# Start a background GUI app on the music workspace. It keeps running when the
+# foreground app changes; use taiji-return/taiji-resume to show it again.
+set -u
+
+ID="${1:-music}"
+shift 1 2>/dev/null || true
+CMD="$*"
+[ -n "$CMD" ] || exit 2
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+SCALE_ENV="$STATE_DIR/scale"
+[ -f "$SCALE_ENV" ] && . "$SCALE_ENV"
+LOG_DIR="${TAIJI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/taiji}/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-/usr/libexec/taiji/taiji-scale}"
+[ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+
+switch_music() {
+    if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && command -v swaymsg >/dev/null 2>&1; then
+        swaymsg workspace music >/dev/null 2>&1 || true
+    elif [ "${TAIJI_SESSION_MODE:-}" = "x11" ] && command -v wmctrl >/dev/null 2>&1; then
+        wmctrl -n 3 >/dev/null 2>&1 || true
+        wmctrl -s 2 >/dev/null 2>&1 || true
+    fi
+}
+switch_taiji() {
+    if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && command -v swaymsg >/dev/null 2>&1; then
+        swaymsg workspace taiji >/dev/null 2>&1 || true
+    elif [ "${TAIJI_SESSION_MODE:-}" = "x11" ] && command -v wmctrl >/dev/null 2>&1; then
+        wmctrl -s 0 >/dev/null 2>&1 || true
+    fi
+}
+
+switch_music
+setsid sh -c "$CMD" >>"$LOG_DIR/$ID.log" 2>&1 < /dev/null &
+PID=$!
+sleep 0.4
+switch_taiji
+
+# Keep the background app alive; if it exits, leave the foreground untouched.
+wait "$PID" 2>/dev/null
+exit 0

@@ -1,0 +1,169 @@
+#!/bin/sh
+# Taiji managed app helper.
+# usage: taiji-run-app <id> <mode> <on_return> <command...>
+set -u
+
+ID="${1:-app}"
+MODE="${2:-auto}"
+ON_RETURN="${3:-pause}"
+shift 3 2>/dev/null || true
+CMD="$*"
+[ -n "$CMD" ] || exit 2
+BACKGROUND=0
+[ "$MODE" = "background" ] && BACKGROUND=1
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+SCALE_ENV="$STATE_DIR/scale"
+[ -f "$SCALE_ENV" ] && . "$SCALE_ENV"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-$SELF_DIR/taiji-scale}"
+[ -x "$SCALE_HELPER" ] || SCALE_HELPER="/usr/libexec/taiji/taiji-scale"
+
+LOG_DIR="${TAIJI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/taiji}/logs"
+mkdir -p "$STATE_DIR" "$TASKS_DIR" "$LOG_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR" "$TASKS_DIR" 2>/dev/null || true
+LOG_FILE="$LOG_DIR/$ID.log"
+NAME="${TAIJI_APP_NAME:-$ID}"
+NAME=$(printf '%s' "$NAME" | tr '\t\r\n' '   ')
+
+SWAY=""
+WMCTRL=""
+command -v swaymsg >/dev/null 2>&1 && SWAY=1
+command -v wmctrl >/dev/null 2>&1 && WMCTRL=1
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+switch_ws() {
+    _ws="$1"
+    if [ -n "$SWAY" ]; then
+        sock=$(sway_socket || true)
+        if [ -n "$sock" ]; then
+            SWAYSOCK="$sock" swaymsg -s "$sock" workspace "$_ws" >/dev/null 2>&1 || true
+        elif [ "${TAIJI_SESSION_MODE:-}" = "wayland" ]; then
+            swaymsg workspace "$_ws" >/dev/null 2>&1 || true
+        fi
+    elif [ -n "$WMCTRL" ]; then
+        case "$_ws" in
+            taiji) _idx=0 ;;
+            music) _idx=2 ;;
+            *) _idx=1 ;;
+        esac
+        wmctrl -n 3 >/dev/null 2>&1 || true
+        wmctrl -s "$_idx" >/dev/null 2>&1 || true
+    fi
+}
+
+write_state() {
+    _fg="$1"; _state="$2"; _pid="$3"; _pgid="$4"
+    tmp="$STATE_FILE.tmp.$$"
+    {
+        printf 'foreground=%s\n' "$_fg"
+        printf 'app_id=%s\n' "$ID"
+        printf 'app_state=%s\n' "$_state"
+        printf 'on_return=%s\n' "$ON_RETURN"
+        printf 'pid=%s\n' "$_pid"
+        printf 'pgid=%s\n' "$_pgid"
+    } > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+task_cleanup() {
+    rm -f "$TASK_FILE" 2>/dev/null || true
+    cur=$(sed -n 's/^app_id=//p' "$STATE_FILE" 2>/dev/null | head -n 1)
+    if [ "$cur" = "$ID" ]; then
+        write_state taiji closed 0 0
+    fi
+}
+
+task_prune
+
+# Reuse this app's workspace if it is already tracked.
+TASK_FILE="$(task_find "$ID" || true)"
+if [ -n "$TASK_FILE" ]; then
+    WS="$(task_get "$TASK_FILE" workspace)"
+else
+    TASK_FILE="$STATE_DIR/tasks/$(printf '%s' "$ID" | tr -c 'A-Za-z0-9._-' '_').task"
+    WS="$(task_free_workspace)"
+fi
+[ -n "$WS" ] || WS=app
+
+switch_ws "$WS"
+SCALE_APPLIED=0
+if [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" app >/dev/null 2>&1; then
+    SCALE_APPLIED=1
+fi
+if [ "$SCALE_APPLIED" = "1" ] && [ "${TAIJI_SESSION_MODE:-}" != "x11" ]; then
+    # The compositor is scaling this app; keep toolkit scaling neutral.
+    export QT_SCALE_FACTOR=1.00
+    export QT_AUTO_SCREEN_SCALE_FACTOR=0
+    export GDK_SCALE=1
+    export GDK_DPI_SCALE=1.00
+elif [ "${TAIJI_SESSION_MODE:-}" != "x11" ] && [ -f "$STATE_DIR/toolkit_scale" ]; then
+    # No compositor scale available: fall back to toolkit scaling.
+    . "$STATE_DIR/toolkit_scale"
+fi
+: > "$LOG_FILE"
+printf '[taiji] workspace=%s\n' "$WS" >> "$LOG_FILE"
+printf '[taiji] %s\n' "$CMD" >> "$LOG_FILE"
+
+setsid sh -c "$CMD" >> "$LOG_FILE" 2>&1 < /dev/null &
+PID=$!
+PGID=$PID
+FULLSCREEN_PID=""
+if [ "$BACKGROUND" = "1" ]; then
+    task_write "$TASK_FILE" "$ID" "$NAME" "$PID" "$PGID" "$WS" "$ON_RETURN" background
+    write_state taiji background "$PID" "$PGID"
+    switch_ws taiji
+else
+    task_write "$TASK_FILE" "$ID" "$NAME" "$PID" "$PGID" "$WS" "$ON_RETURN" foreground
+    write_state app foreground "$PID" "$PGID"
+
+    # Force fullscreen after the first window appears.
+    (
+        n=0
+        while [ "$n" -lt 6 ]; do
+            sleep 0.25
+            if [ -n "$SWAY" ]; then
+                swaymsg fullscreen enable >/dev/null 2>&1 || true
+            elif [ -n "$WMCTRL" ]; then
+                wmctrl -r :ACTIVE: -b add,fullscreen >/dev/null 2>&1 || true
+            fi
+            n=$((n + 1))
+        done
+    ) >/dev/null 2>&1 &
+    FULLSCREEN_PID=$!
+fi
+
+cleanup() {
+    [ -n "${FULLSCREEN_PID:-}" ] && kill "$FULLSCREEN_PID" 2>/dev/null || true
+    kill -TERM "-$PGID" 2>/dev/null || true
+    task_cleanup
+    [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+    switch_ws taiji
+    exit 0
+}
+trap cleanup INT TERM HUP
+
+wait "$PID" 2>/dev/null
+CODE=$?
+[ -n "${FULLSCREEN_PID:-}" ] && kill "$FULLSCREEN_PID" 2>/dev/null || true
+task_cleanup
+[ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
+switch_ws taiji
+printf '[taiji] exit %s\n' "$CODE" >> "$LOG_FILE"
+exit 0

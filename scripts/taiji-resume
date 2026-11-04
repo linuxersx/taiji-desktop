@@ -1,0 +1,96 @@
+#!/bin/sh
+# Resume a managed app previously paused by taiji-return/taiji-overview.
+# usage: taiji-resume <app-id>
+set -u
+
+ID="${1:-}"
+[ -n "$ID" ] || exit 1
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/taiji"
+STATE_FILE="${TAIJI_STATE_FILE:-$STATE_DIR/state}"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
+. "$SELF_DIR/taiji-task-lib" 2>/dev/null || . /usr/libexec/taiji/taiji-task-lib
+SCALE_HELPER="${TAIJI_SCALE_HELPER:-$SELF_DIR/taiji-scale}"
+[ -x "$SCALE_HELPER" ] || SCALE_HELPER="/usr/libexec/taiji/taiji-scale"
+[ -f "$STATE_FILE" ] || exit 1
+
+TASK_FILE="$(task_find "$ID" || true)"
+WORKSPACE="app"
+if [ -n "$TASK_FILE" ]; then
+    PID="$(task_get "$TASK_FILE" pid)"
+    PGID="$(task_get "$TASK_FILE" pgid)"
+    ON_RETURN="$(task_get "$TASK_FILE" on_return)"
+    ws="$(task_get "$TASK_FILE" workspace)"
+    [ -n "$ws" ] && WORKSPACE="$ws"
+    APP_ID="$ID"
+else
+    FG=""; APP_ID=""; APP_STATE=""; ON_RETURN=""; PID=""; PGID=""
+    while IFS='=' read -r k v; do
+        case "$k" in
+            foreground) FG="$v" ;;
+            app_id) APP_ID="$v" ;;
+            app_state) APP_STATE="$v" ;;
+            on_return) ON_RETURN="$v" ;;
+            pid) PID="$v" ;;
+            pgid) PGID="$v" ;;
+        esac
+    done < "$STATE_FILE"
+    [ "$APP_ID" = "$ID" ] || exit 1
+fi
+
+[ -n "$PID" ] || exit 1
+kill -0 "$PID" 2>/dev/null || { [ -n "$TASK_FILE" ] && rm -f "$TASK_FILE" 2>/dev/null; exit 1; }
+
+if [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null; then
+    kill -CONT "-$PGID" 2>/dev/null || kill -CONT "$PID" 2>/dev/null || true
+else
+    kill -CONT "$PID" 2>/dev/null || true
+fi
+
+[ -n "$TASK_FILE" ] && task_set "$TASK_FILE" state foreground || true
+
+tmp="$STATE_FILE.tmp.$$"
+{
+    printf 'foreground=app\n'
+    printf 'app_id=%s\n' "$ID"
+    printf 'app_state=foreground\n'
+    printf 'on_return=%s\n' "${ON_RETURN:-pause}"
+    printf 'pid=%s\n' "$PID"
+    printf 'pgid=%s\n' "$PGID"
+} > "$tmp"
+chmod 600 "$tmp" 2>/dev/null || true
+mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+
+sway_socket() {
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "$SWAYSOCK" ]; then
+        printf '%s\n' "$SWAYSOCK"
+        return 0
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    for s in "$XDG_RUNTIME_DIR"/sway-ipc.*; do
+        [ -S "$s" ] || continue
+        printf '%s\n' "$s"
+        return 0
+    done
+    return 1
+}
+
+if command -v swaymsg >/dev/null 2>&1; then
+    sock=$(sway_socket || true)
+    if [ -n "$sock" ]; then
+        [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" app >/dev/null 2>&1 || true
+        SWAYSOCK="$sock" swaymsg -s "$sock" workspace "$WORKSPACE" >/dev/null 2>&1 || true
+        SWAYSOCK="$sock" swaymsg -s "$sock" fullscreen enable >/dev/null 2>&1 || true
+    elif [ "${TAIJI_SESSION_MODE:-}" = "wayland" ]; then
+        [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" app >/dev/null 2>&1 || true
+        swaymsg workspace "$WORKSPACE" >/dev/null 2>&1 || true
+        swaymsg fullscreen enable >/dev/null 2>&1 || true
+    fi
+elif [ "${TAIJI_SESSION_MODE:-}" = "x11" ] && command -v wmctrl >/dev/null 2>&1; then
+    case "$WORKSPACE" in
+        music) idx=2 ;;
+        taiji) idx=0 ;;
+        *) idx=1 ;;
+    esac
+    wmctrl -s "$idx" >/dev/null 2>&1 || true
+    wmctrl -r :ACTIVE: -b add,fullscreen >/dev/null 2>&1 || true
+fi
