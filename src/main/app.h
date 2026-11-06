@@ -248,6 +248,7 @@ typedef struct App {
     int game_focus;
     int game_page;
     int app_focus;
+    int app_focus_want;
     int app_page;
     bool app_badge;
     bool apps_refresh_pending;

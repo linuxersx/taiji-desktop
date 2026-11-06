@@ -341,7 +341,6 @@ int main(int argc, char **argv)
             backend_save_bmp(&app.backend, shot);
             app.running = false;
         }
-        SDL_Delay(4);
     }
 
     files_ui_free(&app);

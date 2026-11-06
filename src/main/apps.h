@@ -44,6 +44,7 @@ typedef struct {
     bool background;
     bool startup;
     int terminal;      /* AppTerminal */
+    bool terminal_custom;
     bool on_return_custom;
 } AppEntry;
 

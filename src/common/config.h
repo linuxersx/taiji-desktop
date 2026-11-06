@@ -36,6 +36,8 @@ typedef struct {
     int volume;         /* 0..100 */
     int ui_scale;       /* 100..300 percent */
     bool ui_scale_auto; /* derive scale from the display resolution */
+    int refresh_hz;     /* 0 = auto, 60 or 120 = present-rate limit */
+    int render_scale;   /* 50..100, internal render resolution percent */
     char renderer[16];  /* opengl, opengles2, vulkan */
     bool reduce_motion;
     int grid_columns;   /* 0 = automatic */

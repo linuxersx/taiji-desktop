@@ -379,6 +379,7 @@ void app_goto_screen(App *app, Screen screen)
             snprintf(app->app_cat, sizeof(app->app_cat), "all");
             app->app_cat_focus = 0;
             app->app_focus = 0;
+            app->app_focus_want = 0;
             app->app_page = 0;
             app->app_reset_focus = true;
         }
@@ -560,6 +561,7 @@ void app_filter_apps(App *app)
      * L2/R2 return to the first app when a category had no entries. */
     if (app->app_filter_count > 0 && app->app_focus >= app->app_filter_count)
         app->app_focus = app->app_filter_count - 1;
+    if (app->app_filter_count == 0) app->app_focus = 0;
     if (app->app_focus < 0) app->app_focus = 0;
 }
 
@@ -580,13 +582,20 @@ void app_set_app_category(App *app, const char *id)
 {
     snprintf(app->app_cat, sizeof(app->app_cat), "%s", id && *id ? id : "all");
     app->app_cat_focus = apps_category_index(app->app_cat);
-    /* Keep the current position when switching categories. app_filter_apps
-     * clamps to the new count, so the focus lands on the closest card instead
-     * of always jumping back to the first one. */
+    /* app_focus_want is never clamped by a smaller category, so returning to
+     * a larger one restores the position the user left. */
+    int want = app->app_focus_want;
     app_filter_apps(app);
+    if (app->app_filter_count > 0) {
+        app->app_focus = want < app->app_filter_count
+                             ? want : app->app_filter_count - 1;
+    } else {
+        app->app_focus = 0;
+    }
     app->app_on_categories = false;
-    taiji_debug_log("category=%s focus=%d count=%d", app->app_cat,
-                    app->app_focus, app->app_filter_count);
+    taiji_debug_log("category=%s focus=%d want=%d count=%d", app->app_cat,
+                    app->app_focus, app->app_focus_want,
+                    app->app_filter_count);
     app_rebuild(app);
 }
 
@@ -894,6 +903,9 @@ static void app_do_wifi_connect(App *app, const char *ssid, const char *password
     char error[256] = {0};
     bool ok = network_wifi_connect(ssid, password, error, sizeof(error));
     network_wifi_scan_async(false);
+    backend_set_refresh_limit(&app->backend, app->config.refresh_hz);
+    backend_set_render_scale(&app->backend, app->config.render_scale);
+
     system_status_poll(&app->sys);
     ui_update_status(app);
     app->control_focus = 0;
@@ -1342,10 +1354,63 @@ void app_open_overview(App *app)
     if (app->screen != SCREEN_OVERVIEW)
         app->overview_return_screen = app->screen;
     tasks_refresh(&app->tasks);
-    app->overview_focus = 0;
-    for (int i = 0; i < app->tasks.count; i++) {
-        if (app->tasks.items[i].focused) { app->overview_focus = i; break; }
+    apps_runtime_read(&app->runtime);
+    int want = -1;
+    if (strcmp(app->runtime.foreground, "app") == 0) {
+        /* Match the running app in as many ways as the helper may expose it:
+         * app id, process id, the id remembered at launch, or the launcher
+         * pid. External windows are not TASK_KIND_APP, so do not filter kind. */
+        if (app->runtime.app_id[0]) {
+            for (int i = 0; i < app->tasks.count; i++) {
+                if (strcmp(app->tasks.items[i].id, app->runtime.app_id) == 0) {
+                    want = i;
+                    break;
+                }
+            }
+        }
+        if (want < 0 && app->runtime.pid > 0) {
+            for (int i = 0; i < app->tasks.count; i++) {
+                if (app->tasks.items[i].pid == (int)app->runtime.pid) {
+                    want = i;
+                    break;
+                }
+            }
+        }
+        if (want < 0 && app->active_app_id[0]) {
+            for (int i = 0; i < app->tasks.count; i++) {
+                if (strcmp(app->tasks.items[i].id, app->active_app_id) == 0) {
+                    want = i;
+                    break;
+                }
+            }
+        }
+        if (want < 0 && app->launcher.pid > 0) {
+            for (int i = 0; i < app->tasks.count; i++) {
+                if (app->tasks.items[i].pid == (int)app->launcher.pid) {
+                    want = i;
+                    break;
+                }
+            }
+        }
+    } else if (strcmp(app->runtime.foreground, "music") == 0) {
+        for (int i = 0; i < app->tasks.count; i++) {
+            if (app->tasks.items[i].kind == TASK_KIND_MUSIC) {
+                want = i;
+                break;
+            }
+        }
     }
+    if (want < 0) {
+        for (int i = 0; i < app->tasks.count; i++) {
+            if (app->tasks.items[i].focused) { want = i; break; }
+        }
+    }
+    if (want < 0) {
+        for (int i = 0; i < app->tasks.count; i++) {
+            if (app->tasks.items[i].kind == TASK_KIND_TAIJI) { want = i; break; }
+        }
+    }
+    app->overview_focus = want >= 0 ? want : 0;
     app->screen = SCREEN_OVERVIEW;
     app->status_on_bar = false;
     app->nav_on_bar = false;
@@ -1937,7 +2002,7 @@ int app_settings_page_size(int cat)
 {
     if (cat == 0) return 8;
     if (cat == 1) return 7;
-    if (cat == 2) return 10;
+    if (cat == 2) return 14;
     if (cat == 3) return 7;
     if (cat == 4) return 8;
     return 0;
@@ -1947,7 +2012,7 @@ void app_settings_rows(App *app, int *count)
 {
     if (app->settings_cat == 0) *count = 8;
     else if (app->settings_cat == 1) *count = app->library.platform_count + 1;
-    else if (app->settings_cat == 2) *count = 12;
+    else if (app->settings_cat == 2) *count = 14;
     else if (app->settings_cat == 3) *count = 7;
     else if (app->settings_cat == 4) *count = 9;
     else if (app->settings_cat == 5) *count = 4;
@@ -2031,6 +2096,26 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
         return true;
     }
     if (app->settings_cat == 2) {
+        if (row == 0) {
+            int det = backend_display_refresh_hz(&app->backend);
+            snprintf(title, title_size, "刷新率");
+            if (app->config.refresh_hz == 0)
+                snprintf(value, value_size, "自动 (%d Hz)", det);
+            else
+                snprintf(value, value_size, "%d Hz", app->config.refresh_hz);
+            *kind = 3;
+            return true;
+        }
+        if (row == 1) {
+            int pct = app->config.render_scale;
+            if (pct < 50 || pct > 100) pct = 100;
+            snprintf(title, title_size, "渲染分辨率");
+            snprintf(value, value_size, "%d%% (%dx%d)", pct,
+                     app->backend.width, app->backend.height);
+            *kind = 3;
+            return true;
+        }
+        row -= 2;
         switch (row) {
             case 0: {
                 int max = app_ui_scale_max(app);
@@ -2173,6 +2258,32 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
     return false;
 }
 
+static void app_cycle_render_scale(App *app, int dir)
+{
+    static const int vals[] = {100, 75, 67, 50};
+    int idx = 0;
+    for (int i = 0; i < 4; i++)
+        if (vals[i] == app->config.render_scale) idx = i;
+    idx = (idx + dir + 4) % 4;
+    app->config.render_scale = vals[idx];
+    app_save_settings(app);
+    backend_set_render_scale(&app->backend, app->config.render_scale);
+    app_rebuild(app);
+}
+
+static void app_cycle_refresh(App *app, int dir)
+{
+    static const int vals[] = {0, 60, 120};
+    int idx = 0;
+    for (int i = 0; i < 3; i++)
+        if (vals[i] == app->config.refresh_hz) idx = i;
+    idx = (idx + dir + 3) % 3;
+    app->config.refresh_hz = vals[idx];
+    app_save_settings(app);
+    backend_set_refresh_limit(&app->backend, app->config.refresh_hz);
+    app_rebuild(app);
+}
+
 void app_settings_activate(App *app, int row)
 {
     int kind = 0;
@@ -2226,6 +2337,9 @@ void app_settings_activate(App *app, int row)
         return;
     }
     if (app->settings_cat == 2) {
+        if (row == 0) { app_cycle_refresh(app, 1); return; }
+        if (row == 1) { app_cycle_render_scale(app, 1); return; }
+        row -= 2;
         if (row == 0) app_open_choice(app, CHOICE_UI_SCALE, "界面缩放");
         else if (row == 1) app_open_choice(app, CHOICE_THEME, "选择主题");
         else if (row == 2) app_open_choice(app, CHOICE_COLUMNS, "游戏网格列数");
@@ -2326,6 +2440,11 @@ void app_settings_adjust(App *app, int row, int dir)
     int kind = 0;
     char t[256], v[512];
     if (!app_settings_row_info(app, row, t, sizeof(t), v, sizeof(v), &kind)) return;
+    if (app->settings_cat == 2) {
+        if (row == 0) { app_cycle_refresh(app, dir); return; }
+        if (row == 1) { app_cycle_render_scale(app, dir); return; }
+        row -= 2;
+    }
     if (app->settings_cat == 5 && row == 1) {
         app_set_language(app, app->config.language == 1 ? 0 : 1);
         return;
@@ -3206,8 +3325,11 @@ static void switch_tab(App *app, int delta)
     int tabs = app->ui.nav_count;
     if (tabs <= 0) return;
     int tab = nav_index_for_screen(app);
+    int from_tab = tab;
     tab = (tab + delta + tabs) % tabs;
     Screen target = nav_screen_at(app, tab);
+    taiji_debug_log("switch_tab screen=%d target=%d delta=%d index=%d->%d/%d",
+                    (int)app->screen, (int)target, delta, from_tab, tab, tabs);
     app_goto_screen(app, target);
     audio_play(SND_NAV);
 }
@@ -3474,10 +3596,24 @@ static void input_apps(App *app, InputAction action)
         audio_play(SND_NAV);
         return;
     }
-    if (action == IN_LEFT && app->app_focus % cols > 0) app->app_focus--;
-    else if (action == IN_RIGHT && (app->app_focus % cols) < cols - 1 &&
-             app->app_focus + 1 < count) app->app_focus++;
-    else if (action == IN_DOWN && app->app_focus + cols < count) app->app_focus += cols;
+    if (action == IN_LEFT && app->app_focus > 0) app->app_focus--;
+    else if (action == IN_RIGHT && app->app_focus + 1 < count) app->app_focus++;
+    else if (action == IN_DOWN) {
+        /* If the next row exists but the same column is empty (last row is
+         * partial), land on the last item of that row instead of doing
+         * nothing. */
+        int row = app->app_focus / cols;
+        int next_start = (row + 1) * cols;
+        if (next_start < count) {
+            int target = app->app_focus + cols;
+            if (target >= count) {
+                int next_end = next_start + cols - 1;
+                if (next_end >= count) next_end = count - 1;
+                target = next_end;
+            }
+            app->app_focus = target;
+        }
+    }
     else if (action == IN_CONFIRM || action == IN_A) {
         audio_play(SND_ENTER);
         app_launch_external(app);
@@ -3513,7 +3649,11 @@ static void input_apps(App *app, InputAction action)
     taiji_debug_log("apps action=%d focus=%d count=%d cat=%s cols=%d",
                     (int)action, app->app_focus, count, app->app_cat, cols);
     if (app->app_focus != focus_before) {
+        app->app_focus_want = app->app_focus;
         ui_update_apps(app);
+        /* Render this step immediately. The display refresh timer runs much
+         * slower than the input on this device, so without this several
+         * moves collapse into one frame and the UI appears to jump back. */
         audio_play(SND_NAV);
     }
 }
@@ -3567,7 +3707,12 @@ static void modal_app_input(App *app, InputAction action)
             case 6: a->backend = apps_cycle_backend(a->backend, 1); apps_save(&app->apps); ui_update_modal_app(app); break;
             case 7: a->heavy = !a->heavy; apps_save(&app->apps); ui_update_modal_app(app); break;
             case 8: a->background = !a->background; apps_save(&app->apps); ui_update_modal_app(app); break;
-            case 9: a->terminal = (a->terminal + 1) % 3; apps_save(&app->apps); ui_update_modal_app(app); break;
+            case 9:
+                a->terminal = (a->terminal + 1) % 3;
+                a->terminal_custom = true;
+                apps_save(&app->apps);
+                ui_update_modal_app(app);
+                break;
             case 10: app_open_confirm(app, CONFIRM_DELETE_APP, app->app_edit_index,
                                       "删除这个应用？", a->name); break;
         }
@@ -3591,7 +3736,10 @@ static void modal_app_input(App *app, InputAction action)
         else if (app->app_edit_row == 6) a->backend = apps_cycle_backend(a->backend, d);
         else if (app->app_edit_row == 7) a->heavy = !a->heavy;
         else if (app->app_edit_row == 8) a->background = !a->background;
-        else if (app->app_edit_row == 9) a->terminal = (a->terminal + d + 3) % 3;
+        else if (app->app_edit_row == 9) {
+            a->terminal = (a->terminal + d + 3) % 3;
+            a->terminal_custom = true;
+        }
         apps_save(&app->apps);
         audio_play(SND_NAV);
         ui_update_modal_app(app);
@@ -4010,8 +4158,12 @@ void app_input(App *app, InputAction action, const char *text)
     if (app->modal != MODAL_NONE) { modal_input(app, action, text); return; }
     /* Shoulder buttons switch the top-level tabs on every screen, including
      * the embedded file manager and the overview. */
-    if (action == IN_LB) { switch_tab(app, -1); return; }
-    if (action == IN_RB) { switch_tab(app, 1); return; }
+    if (action == IN_LB || action == IN_RB) {
+        int dir = action == IN_LB ? -1 : 1;
+        taiji_debug_log("shoulder %s", dir < 0 ? "L" : "R");
+        switch_tab(app, dir);
+        return;
+    }
     if (app->status_on_bar) { app_input_status(app, action); return; }
     if (app->nav_on_bar) { app_input_nav(app, action); return; }
     if (app->screen == SCREEN_OVERVIEW) { input_overview(app, action); return; }
@@ -4542,6 +4694,7 @@ void app_run(App *app)
 
         if (!app->ui_suspended) {
             lv_timer_handler();
+            lv_refr_now(NULL);
             ui_tick(app);
             backend_present(&app->backend);
         }
@@ -4551,7 +4704,6 @@ void app_run(App *app)
             backend_save_bmp(&app->backend, shot_path);
             app->backend.running = false;
         }
-        SDL_Delay(4);
     }
 
     if (app->launcher.active && app->launcher.external && app->launcher.pid > 0) {

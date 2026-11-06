@@ -41,7 +41,11 @@ static void app_card_clicked(lv_event_t *e)
     App *app = ctx->app;
     app->app_on_categories = false;
     for (int i = 0; i < app->app_filter_count; i++) {
-        if (app->app_filter[i] == ctx->index) { app->app_focus = i; break; }
+        if (app->app_filter[i] == ctx->index) {
+            app->app_focus = i;
+            app->app_focus_want = i;
+            break;
+        }
     }
     audio_play(SND_ENTER);
     app_launch_external(app);
@@ -62,6 +66,7 @@ static void add_app_clicked(lv_event_t *e)
     if (idx < 0) return;
     app_set_app_category(app, "all");
     app->app_focus = app->app_filter_count > 0 ? app->app_filter_count - 1 : 0;
+    app->app_focus_want = app->app_focus;
     app_open_app_editor(app, idx);
 }
 
@@ -304,12 +309,15 @@ void ui_build_apps(App *app)
     if (app->app_reset_focus) {
         app->app_reset_focus = false;
         app->app_focus = 0;
+        app->app_focus_want = 0;
         app->app_page = 0;
         app->app_on_categories = false;
     }
     app_filter_apps(app);
     ui_screen_background(app, NULL, PAL.accent);
     app->ui.app_card_count = 0;
+    app->ui.app_focus_drawn = -1;
+    app->ui.app_focus_ring = NULL;
     app->ui.app_cat_count = 0;
     app->ui.app_page_label = NULL;
 
@@ -417,6 +425,18 @@ void ui_build_apps(App *app)
                            L->app_card_w, L->app_card_h);
         }
         lv_obj_update_layout(grid);
+        /* One ring object for the whole grid. Changing styles on the cards
+         * themselves left the old ring visible for a frame when moving fast. */
+        lv_obj_t *ring = lv_obj_create(grid);
+        lv_obj_remove_style_all(ring);
+        lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(ring, 3, 0);
+        lv_obj_set_style_border_color(ring, lv_color_hex(PAL.accent2), 0);
+        lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(ring, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        app->ui.app_focus_ring = ring;
         lv_obj_scroll_to_y(grid, 0, LV_ANIM_OFF);
         if (app->ui.app_card_count > 0) {
             int focus = app->app_focus;
@@ -435,15 +455,19 @@ void ui_build_apps(App *app)
 
 void ui_update_apps(App *app)
 {
+    int old_focus = app->ui.app_focus_drawn;
+    bool full = old_focus < 0;
     for (int i = 0; i < app->ui.app_card_count; i++) {
         int gi = app->ui.app_card_indices[i];
         if (gi < 0 || gi >= app->apps.count) continue;
         bool focused = i == app->app_focus;
         AppEntry *entry = &app->apps.apps[gi];
-        ui_set_card_focus(app->ui.app_cards[i], focused, ui_focus_accent(gi));
-        if (app->ui.app_titles[i]) {
-            lv_obj_set_style_text_color(app->ui.app_titles[i],
-                                        lv_color_hex(focused ? PAL.text : PAL.text2), 0);
+        /* Only the title colour changes on the cards themselves. */
+        if (full || i == old_focus || i == app->app_focus) {
+            if (app->ui.app_titles[i]) {
+                lv_obj_set_style_text_color(app->ui.app_titles[i],
+                                            lv_color_hex(focused ? PAL.text : PAL.text2), 0);
+            }
         }
         const char *status = app_status_text(app, entry);
         if (!app_badge_wanted(status)) {
@@ -469,11 +493,57 @@ void ui_update_apps(App *app)
                     lv_color_hex(app_status_color(status)), 0);
             }
         }
-        if (focused) lv_obj_scroll_to_view(app->ui.app_cards[i], LV_ANIM_OFF);
+        if (focused) {
+            /* Only scroll when the card is actually outside the viewport.
+             * scroll_to_view() invalidated the whole grid even when the card
+             * was already visible, which cost ~150ms per focus move. */
+            lv_area_t ca, ga;
+            lv_obj_get_coords(app->ui.app_cards[i], &ca);
+            lv_obj_get_coords(app->ui.app_grid, &ga);
+            if (ca.y1 < ga.y1 || ca.y2 > ga.y2)
+                lv_obj_scroll_to_view(app->ui.app_cards[i], LV_ANIM_OFF);
+        }
     }
-    /* Focus rings can leave a shadow trail when cards scroll; repaint the
-     * whole screen once per focus move so nothing is left behind. */
-    lv_obj_invalidate(lv_screen_active());
+    /* Move the single ring object onto the focused card. LVGL invalidates the
+     * old and new ring areas, and no other card can keep a stale ring. */
+    if (app->ui.app_focus_ring) {
+        int f = app->app_focus;
+        if (f >= 0 && f < app->ui.app_card_count && app->ui.app_cards[f]) {
+            lv_obj_t *card = app->ui.app_cards[f];
+            int old = app->ui.app_focus_drawn;
+            /* Erase the old ring first: hide it, then repaint the old card. */
+            lv_obj_add_flag(app->ui.app_focus_ring, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_invalidate(app->ui.app_focus_ring);
+            if (old >= 0 && old < app->ui.app_card_count &&
+                app->ui.app_cards[old])
+                lv_obj_invalidate(app->ui.app_cards[old]);
+            lv_obj_set_pos(app->ui.app_focus_ring,
+                           lv_obj_get_x(card), lv_obj_get_y(card));
+            lv_obj_set_size(app->ui.app_focus_ring,
+                            lv_obj_get_width(card), lv_obj_get_height(card));
+            lv_obj_set_style_radius(app->ui.app_focus_ring,
+                                    lv_obj_get_style_radius(card, 0), 0);
+            {
+                int gi = app->ui.app_card_indices[f];
+                lv_obj_set_style_border_color(app->ui.app_focus_ring,
+                    lv_color_hex(ui_focus_accent(gi)), 0);
+            }
+            lv_obj_clear_flag(app->ui.app_focus_ring, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(app->ui.app_focus_ring);
+            lv_obj_invalidate(app->ui.app_focus_ring);
+            lv_obj_invalidate(card);
+        } else {
+            lv_obj_add_flag(app->ui.app_focus_ring, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    app->ui.app_focus_drawn = app->app_focus;
+    /* lv_obj_invalidate() normally resumes the display refresh timer, but on
+     * this build the timer stayed paused and the screen only updated a few
+     * times per second. Resume it explicitly after a focus change. */
+    {
+        lv_timer_t *rt = lv_display_get_refr_timer(lv_display_get_default());
+        if (rt) lv_timer_resume(rt);
+    }
     if (app->ui.app_grid_count) {
         char sub[160];
         snprintf(sub, sizeof(sub), "%s / %d 个应用 / Guide 或 Home 返回",

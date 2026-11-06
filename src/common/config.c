@@ -33,6 +33,8 @@ void config_init(Config *c)
     c->volume = 60;
     c->ui_scale = 100;
     c->ui_scale_auto = true;
+    c->refresh_hz = 0;
+    c->render_scale = 100;
     snprintf(c->renderer, sizeof(c->renderer), "opengles2");
     c->grid_columns = 0;
     c->scan_on_start = true;
@@ -187,6 +189,16 @@ void config_load(Config *c)
             c->ui_scale_auto = atoi(val) != 0;
             auto_seen = true;
         }
+        else if (strcmp(key, "refresh_hz") == 0) {
+            c->refresh_hz = atoi(val);
+            if (c->refresh_hz != 60 && c->refresh_hz != 120)
+                c->refresh_hz = 0;
+        }
+        else if (strcmp(key, "render_scale") == 0) {
+            c->render_scale = atoi(val);
+            if (c->render_scale < 50 || c->render_scale > 100)
+                c->render_scale = 100;
+        }
         else if (strcmp(key, "renderer") == 0) {
             if (strcmp(val, "opengles2") == 0 || strcmp(val, "gles") == 0 ||
                 strcmp(val, "opengles") == 0)
@@ -255,6 +267,8 @@ void config_save(const Config *c)
     APPEND("volume=%d\n", c->volume);
     APPEND("ui_scale=%d\n", c->ui_scale);
     APPEND("ui_scale_auto=%d\n", c->ui_scale_auto ? 1 : 0);
+    APPEND("refresh_hz=%d\n", c->refresh_hz);
+    APPEND("render_scale=%d\n", c->render_scale);
     APPEND("renderer=%s\n", c->renderer[0] ? c->renderer : "opengles2");
     APPEND("reduce_motion=%d\n", c->reduce_motion ? 1 : 0);
     APPEND("grid_columns=%d\n", c->grid_columns);

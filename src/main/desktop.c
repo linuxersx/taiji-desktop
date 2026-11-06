@@ -27,6 +27,7 @@ typedef struct {
     bool no_display;
     bool hidden;
     bool terminal;
+    bool terminal_set;
 } DesktopEntry;
 
 static bool has_suffix_ci(const char *s, const char *suffix)
@@ -388,7 +389,10 @@ static bool parse_desktop(const char *path, DesktopEntry *e)
         else if (strcmp(key, "TryExec") == 0) snprintf(e->try_exec, sizeof(e->try_exec), "%s", val);
         else if (strcmp(key, "NoDisplay") == 0) e->no_display = str_ieq(val, "true");
         else if (strcmp(key, "Hidden") == 0) e->hidden = str_ieq(val, "true");
-        else if (strcmp(key, "Terminal") == 0) e->terminal = str_ieq(val, "true");
+        else if (strcmp(key, "Terminal") == 0) {
+            e->terminal = str_ieq(val, "true");
+            e->terminal_set = true;
+        }
     }
     free(data);
     return e->type[0] && str_ieq(e->type, "Application") && e->exec[0] &&
@@ -463,17 +467,20 @@ static bool import_file(AppList *list, const char *path, DesktopImportStats *sta
 
     /* A periodic rescan must not report a change when nothing changed, or the
      * app badge lights up and apps.json gets rewritten every few seconds. */
-    int new_terminal = e.terminal ? APP_TERMINAL_YES : APP_TERMINAL_AUTO;
+    int new_terminal = e.terminal_set
+                           ? (e.terminal ? APP_TERMINAL_YES : APP_TERMINAL_NO)
+                           : APP_TERMINAL_AUTO;
     int new_return = a->on_return_custom ? a->on_return :
                      (strcmp(new_category, "media") == 0 ?
                       APP_ON_RETURN_RUN : APP_ON_RETURN_PAUSE);
     bool changed = added;
+    bool terminal_changed = !a->terminal_custom && a->terminal != new_terminal;
     if (!added &&
         (strcmp(a->name, new_name) != 0 ||
          strcmp(a->command, new_command) != 0 ||
          strcmp(a->icon, new_icon) != 0 ||
          strcmp(a->category, new_category) != 0 ||
-         a->terminal != new_terminal ||
+         terminal_changed ||
          a->on_return != new_return)) {
         changed = true;
     }
@@ -482,7 +489,7 @@ static bool import_file(AppList *list, const char *path, DesktopImportStats *sta
         snprintf(a->command, sizeof(a->command), "%s", new_command);
         snprintf(a->icon, sizeof(a->icon), "%s", new_icon);
         snprintf(a->category, sizeof(a->category), "%s", new_category);
-        a->terminal = new_terminal;
+        if (!a->terminal_custom) a->terminal = new_terminal;
         a->on_return = new_return;
     }
     if (added) stats->added++;

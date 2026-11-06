@@ -293,20 +293,41 @@ int main(void)
         int rc = poll(pfds, (nfds_t)n, 100);
         if (rc > 0) {
             for (int i = 0; i < n; i++) {
-                if (!(pfds[i].revents & POLLIN)) continue;
-                struct input_event ev[32];
-                ssize_t got;
-                while ((got = read(active[i].fd, ev, sizeof(ev))) > 0) {
-                    int count = (int)(got / (ssize_t)sizeof(ev[0]));
-                    for (int k = 0; k < count; k++) handle_event(&ev[k], &active[i]);
-                }
-                if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                short re = pfds[i].revents;
+                if (!re) continue;
+
+                /* The event node can be destroyed and recreated (uinput,
+                 * virtual pads, controller daemons).  The old fd then points
+                 * to a deleted inode and poll() returns POLLHUP immediately.
+                 * Without this branch the loop spins at 100% CPU and the new
+                 * node is never opened because the path still looks present. */
+                if (re & (POLLHUP | POLLERR | POLLNVAL)) {
                     close_device(&active[i]);
                     for (int j = 0; j < g_count; j++) {
                         if (strcmp(g_devices[j].path, active[i].path) == 0) {
                             g_devices[j].fd = -1;
                         }
                     }
+                    last_scan = 0; /* rescan immediately */
+                    continue;
+                }
+
+                if (!(re & POLLIN)) continue;
+                struct input_event ev[32];
+                ssize_t got;
+                while ((got = read(active[i].fd, ev, sizeof(ev))) > 0) {
+                    int count = (int)(got / (ssize_t)sizeof(ev[0]));
+                    for (int k = 0; k < count; k++) handle_event(&ev[k], &active[i]);
+                }
+                if (got == 0 ||
+                    (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    close_device(&active[i]);
+                    for (int j = 0; j < g_count; j++) {
+                        if (strcmp(g_devices[j].path, active[i].path) == 0) {
+                            g_devices[j].fd = -1;
+                        }
+                    }
+                    last_scan = 0;
                 }
             }
         }

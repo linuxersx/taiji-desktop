@@ -67,10 +67,10 @@ void apps_load(AppList *list)
         if (!*line || *line == '#') continue;
         if (list->count >= (int)(sizeof(list->apps) / sizeof(list->apps[0]))) break;
 
-        char *fields[14] = {0};
+        char *fields[16] = {0};
         int n = 0;
         char *p = line;
-        while (n < 14) {
+        while (n < 16) {
             fields[n++] = p;
             char *tab = strchr(p, '\t');
             if (!tab) break;
@@ -109,6 +109,7 @@ void apps_load(AppList *list)
         if (a->terminal < APP_TERMINAL_AUTO || a->terminal > APP_TERMINAL_NO)
             a->terminal = APP_TERMINAL_AUTO;
         a->on_return_custom = n > 13 ? atoi(fields[13]) != 0 : false;
+        a->terminal_custom = n > 14 ? atoi(fields[14]) != 0 : false;
         if (!a->id[0]) {
             snprintf(a->id, sizeof(a->id), "app-%ld-%d", (long)time(NULL), list->count);
         }
@@ -138,12 +139,13 @@ bool apps_save(const AppList *list)
         char *icon = escape_field(a->icon);
         char *cat = escape_field(a->category[0] ? a->category : "other");
         char *dfile = escape_field(a->desktop_file);
-        char *line = xasprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%d\t%d\n",
+        char *line = xasprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%d\t%d\t%d\n",
                                id, name, cmd, icon,
                                apps_mode_name(a->mode), apps_return_name(a->on_return),
                                apps_backend_name(a->backend), a->heavy ? 1 : 0,
                                a->background ? 1 : 0, a->startup ? 1 : 0, cat, dfile,
-                               a->terminal, a->on_return_custom ? 1 : 0);
+                               a->terminal, a->on_return_custom ? 1 : 0,
+                               a->terminal_custom ? 1 : 0);
         size_t need = strlen(line);
         if (used + need + 1 > cap) {
             while (used + need + 1 > cap) cap *= 2;

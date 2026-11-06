@@ -122,6 +122,8 @@ typedef struct {
     lv_obj_t *settings_rows[40];
     lv_obj_t *settings_hint_label;
     int settings_row_count;
+    int app_focus_drawn;
+    lv_obj_t *app_focus_ring;
     lv_obj_t *settings_title;
     lv_obj_t *settings_subtitle;
     lv_obj_t *settings_license_body;

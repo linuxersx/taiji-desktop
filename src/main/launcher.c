@@ -270,14 +270,22 @@ static bool command_is_tui(const char *command)
     if (!f) return false;
     char buf[512];
     bool tui = false;
+    bool gui = false;
     while (fgets(buf, sizeof(buf), f)) {
-        if (strstr(buf, "libncurses") || strstr(buf, "libtinfo")) {
+        if (strstr(buf, "libncurses") || strstr(buf, "libtinfo"))
             tui = true;
-            break;
-        }
+        if (strstr(buf, "libQt6") || strstr(buf, "libQt5") ||
+            strstr(buf, "libgtk") || strstr(buf, "libgdk") ||
+            strstr(buf, "libSDL") || strstr(buf, "libwayland") ||
+            strstr(buf, "libX11") || strstr(buf, "libxcb") ||
+            strstr(buf, "libGL") || strstr(buf, "libEGL") ||
+            strstr(buf, "libvulkan"))
+            gui = true;
     }
     pclose(f);
-    return tui;
+    /* LLVM/curl-style dependencies can pull in libncurses without the app
+     * being a terminal UI.  A GUI toolkit or display library wins. */
+    return tui && !gui;
 }
 
 static bool entry_needs_terminal(const AppEntry *entry)

@@ -14,6 +14,11 @@ static uint32_t tick_cb(void)
     return SDL_GetTicks();
 }
 
+static int g_refresh_detected = 60;
+static int g_refresh_limit;
+static int g_refresh_effective = 60;
+static bool g_renderer_vsync;
+
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     Backend *b = lv_display_get_user_data(disp);
@@ -153,8 +158,21 @@ int backend_take_captured_button(void)
 
 /* ── Input helpers ─────────────────────────────────────────────────────────── */
 
-static float g_sdl_axis_x;
-static float g_sdl_axis_y;
+#define NAV_BTN_COUNT 32
+static bool g_btn_cur[NAV_BTN_COUNT];
+static bool g_btn_prev[NAV_BTN_COUNT];
+static float g_axis_x, g_axis_y;
+static int g_trig_lt, g_trig_rt;
+static bool g_lt_held, g_rt_held;
+static int g_nav_dir;
+static uint32_t g_nav_next;
+static int g_stick_dir;
+static int g_stick_axis;
+static float g_stick_mag;
+static int g_stick_candidate;
+static uint32_t g_stick_candidate_since;
+static int g_kbd_dir;
+static bool g_nav_present;
 
 static void emit(Backend *b, InputAction a, const char *text)
 {
@@ -219,10 +237,25 @@ static void open_controller(Backend *b, int index)
             b->controller_family = 3;
         }
     }
-    g_sdl_axis_x = (float)SDL_GameControllerGetAxis(
-                        b->controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-    g_sdl_axis_y = (float)SDL_GameControllerGetAxis(
-                        b->controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+    memset(g_btn_cur, 0, sizeof(g_btn_cur));
+    memset(g_btn_prev, 0, sizeof(g_btn_prev));
+    g_axis_x = (float)SDL_GameControllerGetAxis(
+                   b->controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+    g_axis_y = (float)SDL_GameControllerGetAxis(
+                   b->controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+    g_trig_lt = SDL_GameControllerGetAxis(
+                    b->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    g_trig_rt = SDL_GameControllerGetAxis(
+                    b->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    g_lt_held = g_trig_lt > 18000;
+    g_rt_held = g_trig_rt > 18000;
+    g_nav_dir = 0;
+    g_stick_dir = 0;
+    g_stick_axis = 0;
+    g_stick_mag = 0;
+    g_stick_candidate = 0;
+    g_stick_candidate_since = 0;
+    g_kbd_dir = 0;
     SDL_GameControllerEventState(SDL_ENABLE);
     fprintf(stderr, "[taiji] controller connected: %s\n", b->controller_name);
 }
@@ -238,6 +271,18 @@ static void close_controller(Backend *b, SDL_JoystickID id)
         b->controller_id = -1;
         b->controller_family = 0;
         b->controller_name[0] = '\0';
+        memset(g_btn_cur, 0, sizeof(g_btn_cur));
+        memset(g_btn_prev, 0, sizeof(g_btn_prev));
+        g_axis_x = g_axis_y = 0;
+        g_trig_lt = g_trig_rt = 0;
+        g_lt_held = g_rt_held = false;
+        g_nav_dir = 0;
+        g_stick_dir = 0;
+        g_stick_axis = 0;
+        g_stick_mag = 0;
+        g_stick_candidate = 0;
+        g_stick_candidate_since = 0;
+        g_kbd_dir = 0;
     }
     (void)js;
 }
@@ -268,24 +313,9 @@ static InputAction map_face_button(Backend *b, int button, bool down)
     return IN_NONE;
 }
 
-/* Navigation repeat state. Keyboard, d-pad and stick are tracked as separate
- * sources so a resting stick cannot fight a button press. */
-typedef struct {
-    int dir;                 /* currently repeating direction */
-    uint32_t next_repeat;
-    uint32_t repeat_ms;
-    uint32_t dpad_held;      /* bitmask, bit == InputAction */
-    int dpad_dir;            /* most recently pressed held direction */
-    int kbd_last;
-    int stick_candidate;
-    int stick_axis;          /* 0 none, 1 horizontal, 2 vertical */
-    uint32_t stick_lock_until;
-} NavRepeat;
-
-static NavRepeat g_nav = {0};
-static bool g_lt_held = false;
-static bool g_rt_held = false;
-
+/* Menu input model follows RetroArch: SDL events only update button state,
+ * and backend_poll() turns that state into at most one navigation action per
+ * frame. Holding a direction repeats every 50 ms (20 steps/s). */
 static const char *dir_name(int dir)
 {
     switch (dir) {
@@ -297,83 +327,178 @@ static const char *dir_name(int dir)
     }
 }
 
-static void nav_repeat(Backend *b, int dir, uint32_t first_ms,
-                       uint32_t repeat_ms, bool edge)
+static int dpad_button_of(int dir)
 {
-    uint32_t now = SDL_GetTicks();
-    if (repeat_ms < 30) repeat_ms = 30;
-    if (dir <= 0) {
-        g_nav.dir = 0;
-        return;
-    }
-    if (g_nav.dir != dir) {
-        g_nav.dir = dir;
-        g_nav.repeat_ms = repeat_ms;
-        g_nav.next_repeat = now + first_ms;
-        if (edge) {
-            taiji_debug_log("nav %s (first)", dir_name(dir));
-            emit(b, (InputAction)dir, NULL);
-        }
-        return;
-    }
-    g_nav.repeat_ms = repeat_ms;
-    if ((int32_t)(now - g_nav.next_repeat) >= 0) {
-        taiji_debug_log("nav %s (repeat %ums)", dir_name(dir),
-                        (unsigned)repeat_ms);
-        emit(b, (InputAction)dir, NULL);
-        g_nav.next_repeat = now + g_nav.repeat_ms;
-    }
-}
-
-static int dpad_bit(int dir)
-{
-    return dir > 0 && dir <= IN_RIGHT ? (1 << dir) : 0;
-}
-
-static int dpad_from_button(int btn)
-{
-    switch (btn) {
-        case SDL_CONTROLLER_BUTTON_DPAD_UP: return IN_UP;
-        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return IN_DOWN;
-        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return IN_LEFT;
-        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return IN_RIGHT;
-        default: return 0;
+    switch (dir) {
+        case IN_UP: return SDL_CONTROLLER_BUTTON_DPAD_UP;
+        case IN_DOWN: return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+        case IN_LEFT: return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+        case IN_RIGHT: return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+        default: return -1;
     }
 }
 
 static int dpad_current(void)
 {
-    if (g_nav.dpad_held & dpad_bit(IN_UP)) return IN_UP;
-    if (g_nav.dpad_held & dpad_bit(IN_DOWN)) return IN_DOWN;
-    if (g_nav.dpad_held & dpad_bit(IN_LEFT)) return IN_LEFT;
-    if (g_nav.dpad_held & dpad_bit(IN_RIGHT)) return IN_RIGHT;
+    if (g_btn_cur[SDL_CONTROLLER_BUTTON_DPAD_UP]) return IN_UP;
+    if (g_btn_cur[SDL_CONTROLLER_BUTTON_DPAD_DOWN]) return IN_DOWN;
+    if (g_btn_cur[SDL_CONTROLLER_BUTTON_DPAD_LEFT]) return IN_LEFT;
+    if (g_btn_cur[SDL_CONTROLLER_BUTTON_DPAD_RIGHT]) return IN_RIGHT;
     return 0;
 }
 
-/* D-pad presses arrive as SDL button events; polling GetButton misses the
- * release/re-press pairs produced by this controller, which left the old
- * repeat timer running and moved one extra cell. */
-static void handle_dpad_button(Backend *b, int dir, bool down)
+static bool dpad_edge(int dir)
+{
+    int b = dpad_button_of(dir);
+    return b >= 0 && g_btn_cur[b] && !g_btn_prev[b];
+}
+
+static bool button_edge(int btn)
+{
+    return btn >= 0 && btn < NAV_BTN_COUNT && g_btn_cur[btn] && !g_btn_prev[btn];
+}
+
+/* One action per frame. A fresh press is immediate; a held direction repeats
+ * on a 50 ms real-time schedule, carrying over frame overshoot. */
+static void nav_step(Backend *b, int dir, uint32_t now, bool fresh,
+                     uint32_t first_ms, uint32_t repeat_ms)
+{
+    if (dir <= 0) {
+        g_nav_dir = 0;
+        return;
+    }
+    if (fresh || g_nav_dir != dir) {
+        g_nav_dir = dir;
+        g_nav_next = now + first_ms;
+        taiji_debug_log("nav %s (press)", dir_name(dir));
+        emit(b, (InputAction)dir, NULL);
+        g_nav_present = true;
+        return;
+    }
+    if ((int32_t)(now - g_nav_next) >= 0) {
+        g_nav_next = now + repeat_ms;
+        taiji_debug_log("nav %s (repeat)", dir_name(dir));
+        emit(b, (InputAction)dir, NULL);
+        g_nav_present = true;
+    }
+}
+
+static int stick_current(void)
+{
+    float ax = g_axis_x;
+    float ay = g_axis_y;
+    float aax = fabsf(ax);
+    float aay = fabsf(ay);
+    float mag = aax > aay ? aax : aay;
+    if (mag < 0.45f) {
+        g_stick_axis = 0;
+        g_stick_mag = 0;
+        return 0;
+    }
+    int axis = g_stick_axis;
+    if (aax > aay * 1.15f) axis = 1;
+    else if (aay > aax * 1.15f) axis = 2;
+    if (axis == 0) axis = aax >= aay ? 1 : 2;
+    g_stick_axis = axis;
+    float primary = axis == 1 ? aax : aay;
+    if (primary < 0.45f) {
+        g_stick_mag = 0;
+        return 0;
+    }
+    g_stick_mag = primary;
+    return axis == 1 ? (ax < 0 ? IN_LEFT : IN_RIGHT)
+                     : (ay < 0 ? IN_UP : IN_DOWN);
+}
+
+static void process_gamepad(Backend *b)
 {
     uint32_t now = SDL_GetTicks();
-    int bit = dpad_bit(dir);
-    if (!bit) return;
-    if (down) {
-        /* Pass every SDL press straight through. */
-        g_nav.dpad_held |= bit;
-        g_nav.dpad_dir = dir;
-        g_nav.dir = 0;
-        g_nav.stick_candidate = 0;
-        g_nav.stick_lock_until = now + 120;
-        taiji_debug_log("dpad %s (down)", dir_name(dir));
-        nav_repeat(b, dir, 300, 90, true);
-    } else {
-        g_nav.dpad_held &= ~bit;
-        if (g_nav.dpad_dir == dir) g_nav.dpad_dir = dpad_current();
-        if (!g_nav.dpad_dir) g_nav.dir = 0;
-        g_nav.stick_lock_until = now + 120;
-        taiji_debug_log("dpad %s (up)", dir_name(dir));
+
+    /* Triggers (L2/R2). */
+    if (g_trig_lt > 18000 && !g_lt_held) {
+        taiji_debug_log("trigger LT");
+        emit(b, IN_LT, NULL);
+        g_lt_held = true;
+    } else if (g_trig_lt < 14000) {
+        g_lt_held = false;
     }
+    if (g_trig_rt > 18000 && !g_rt_held) {
+        taiji_debug_log("trigger RT");
+        emit(b, IN_RT, NULL);
+        g_rt_held = true;
+    } else if (g_trig_rt < 14000) {
+        g_rt_held = false;
+    }
+
+    /* Menu/action buttons: one action per physical press. */
+    int face_btns[4] = {
+        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,
+        SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y
+    };
+    for (int i = 0; i < 4; i++) {
+        if (button_edge(face_btns[i])) {
+            InputAction a = map_face_button(b, face_btns[i], true);
+            if (a != IN_NONE) emit(b, a, NULL);
+        }
+    }
+    if (button_edge(SDL_CONTROLLER_BUTTON_START)) emit(b, IN_START, NULL);
+    if (button_edge(SDL_CONTROLLER_BUTTON_BACK)) emit(b, IN_SELECT, NULL);
+    if (button_edge(SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) emit(b, IN_LB, NULL);
+    if (button_edge(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) emit(b, IN_RB, NULL);
+
+    /* Direction: keyboard first, then d-pad, then left stick. */
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    int kdir = 0;
+    if (ks[SDL_SCANCODE_UP]) kdir = IN_UP;
+    else if (ks[SDL_SCANCODE_DOWN]) kdir = IN_DOWN;
+    else if (ks[SDL_SCANCODE_LEFT]) kdir = IN_LEFT;
+    else if (ks[SDL_SCANCODE_RIGHT]) kdir = IN_RIGHT;
+    bool kedge = (kdir != g_kbd_dir);
+    g_kbd_dir = kdir;
+
+    int dpad = dpad_current();
+    bool dedge = dpad_edge(dpad);
+
+    int raw_stick = stick_current();
+    if (raw_stick != g_stick_candidate) {
+        g_stick_candidate = raw_stick;
+        g_stick_candidate_since = now;
+        taiji_debug_log("stick raw=%s x=%.2f y=%.2f", dir_name(raw_stick),
+                        g_axis_x, g_axis_y);
+    }
+    int stick = 0;
+    if (g_stick_candidate &&
+        (int32_t)(now - g_stick_candidate_since) >= 80)
+        stick = g_stick_candidate;
+    bool sedge = (stick != g_stick_dir);
+    g_stick_dir = stick;
+
+    int dir = 0;
+    bool fresh = false;
+    if (kdir) { dir = kdir; fresh = kedge; }
+    else if (dpad) { dir = dpad; fresh = dedge; }
+    else if (stick) { dir = stick; fresh = sedge; }
+
+    if (dir && fresh)
+        taiji_debug_log("source kbd=%d dpad=%d stick=%d dir=%s",
+                        kdir ? 1 : 0, dpad ? 1 : 0, stick ? 1 : 0,
+                        dir_name(dir));
+    if (stick && dir == stick) {
+        float t = (g_stick_mag - 0.30f) / 0.70f;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        uint32_t rep = (uint32_t)(110.0f - 55.0f * t);
+        nav_step(b, dir, now, fresh, 280, rep);
+    } else {
+        nav_step(b, dir, now, fresh, 300, 90);
+    }
+    if (g_nav_present) {
+        g_nav_present = false;
+        lv_refr_now(NULL);
+        backend_present(b);
+    }
+
+    memcpy(g_btn_prev, g_btn_cur, sizeof(g_btn_prev));
 }
 
 static void backend_apply_size(Backend *b, int w, int h);
@@ -525,27 +650,14 @@ void backend_poll(Backend *b)
                 break;
             case SDL_CONTROLLERAXISMOTION:
                 if (e.caxis.which != b->controller_id) break;
-                if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
-                    g_sdl_axis_x = (float)e.caxis.value / 32767.0f;
-                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
-                    g_sdl_axis_y = (float)e.caxis.value / 32767.0f;
-                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT) {
-                    if (e.caxis.value > 18000 && !g_lt_held) {
-                        taiji_debug_log("trigger LT");
-                        emit(b, IN_LT, NULL);
-                        g_lt_held = true;
-                    } else if (e.caxis.value < 14000) {
-                        g_lt_held = false;
-                    }
-                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
-                    if (e.caxis.value > 18000 && !g_rt_held) {
-                        taiji_debug_log("trigger RT");
-                        emit(b, IN_RT, NULL);
-                        g_rt_held = true;
-                    } else if (e.caxis.value < 14000) {
-                        g_rt_held = false;
-                    }
-                }
+                if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
+                    g_axis_x = (float)e.caxis.value / 32767.0f;
+                else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
+                    g_axis_y = (float)e.caxis.value / 32767.0f;
+                else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
+                    g_trig_lt = e.caxis.value;
+                else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+                    g_trig_rt = e.caxis.value;
                 break;
             case SDL_CONTROLLERDEVICEADDED:
                 open_controller(b, e.cdevice.which);
@@ -557,101 +669,15 @@ void backend_poll(Backend *b)
             case SDL_CONTROLLERBUTTONUP: {
                 if (e.cbutton.which != b->controller_id) break;
                 int btn = e.cbutton.button;
-                bool down = e.type == SDL_CONTROLLERBUTTONDOWN;
-                taiji_debug_log("button which=%d btn=%d value=%d",
-                                (int)e.cbutton.which, btn, down ? 1 : 0);
-                int dpad_dir = dpad_from_button(btn);
-                if (dpad_dir) {
-                    handle_dpad_button(b, dpad_dir, down);
-                    break;
-                }
-                if (!down) break;
-                InputAction a = map_face_button(b, btn, down);
-                if (a != IN_NONE) { emit(b, a, NULL); break; }
-                switch (btn) {
-                    case SDL_CONTROLLER_BUTTON_START: emit(b, IN_START, NULL); break;
-                    case SDL_CONTROLLER_BUTTON_BACK: emit(b, IN_SELECT, NULL); break;
-                    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: emit(b, IN_LB, NULL); break;
-                    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: emit(b, IN_RB, NULL); break;
-                    default: break;
-                }
+                if (btn >= 0 && btn < NAV_BTN_COUNT)
+                    g_btn_cur[btn] = e.type == SDL_CONTROLLERBUTTONDOWN;
                 break;
             }
             default: break;
         }
     }
 
-    /* Keyboard arrow keys. */
-    const Uint8 *ks = SDL_GetKeyboardState(NULL);
-    int kdir = 0;
-    if (ks[SDL_SCANCODE_UP]) kdir = IN_UP;
-    else if (ks[SDL_SCANCODE_DOWN]) kdir = IN_DOWN;
-    else if (ks[SDL_SCANCODE_LEFT]) kdir = IN_LEFT;
-    else if (ks[SDL_SCANCODE_RIGHT]) kdir = IN_RIGHT;
-
-    if (kdir != g_nav.kbd_last) {
-        g_nav.kbd_last = kdir;
-        g_nav.dir = 0;
-        g_nav.stick_candidate = 0;
-        if (kdir) nav_repeat(b, kdir, 300, 90, true);
-        return;
-    }
-    if (kdir) {
-        nav_repeat(b, kdir, 300, 90, false);
-        return;
-    }
-
-    uint32_t now = SDL_GetTicks();
-    if (g_nav.dpad_dir) {
-        nav_repeat(b, g_nav.dpad_dir, 300, 90, false);
-        return;
-    }
-
-    /* Left stick with axis and magnitude hysteresis. A new direction must stay
-     * stable before it moves, which stops the 4-5 cell jump when the stick is
-     * pushed from center to the edge. */
-    if (!b->controller) return;
-    if ((int32_t)(now - g_nav.stick_lock_until) < 0) {
-        g_nav.dir = 0;
-        g_nav.stick_candidate = 0;
-        return;
-    }
-    float ax = g_sdl_axis_x;
-    float ay = g_sdl_axis_y;
-    float aax = fabsf(ax);
-    float aay = fabsf(ay);
-    float mag = aax > aay ? aax : aay;
-    if (mag < 0.30f) {
-        g_nav.stick_axis = 0;
-        g_nav.stick_candidate = 0;
-        g_nav.dir = 0;
-        return;
-    }
-    int axis = g_nav.stick_axis;
-    if (aax > aay * 1.15f) axis = 1;
-    else if (aay > aax * 1.15f) axis = 2;
-    if (axis == 0) axis = aax >= aay ? 1 : 2;
-    g_nav.stick_axis = axis;
-    float primary = axis == 1 ? aax : aay;
-    if (primary < 0.30f) {
-        g_nav.stick_candidate = 0;
-        g_nav.dir = 0;
-        return;
-    }
-    int sdir = axis == 1 ? (ax < 0 ? IN_LEFT : IN_RIGHT)
-                         : (ay < 0 ? IN_UP : IN_DOWN);
-    float t = (primary - 0.30f) / 0.70f;
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    uint32_t rep = (uint32_t)(110.0f - 55.0f * t);
-    if (sdir != g_nav.stick_candidate) {
-        g_nav.stick_candidate = sdir;
-        g_nav.dir = 0;
-        taiji_debug_log("stick %s (mag %.2f)", dir_name(sdir), mag);
-        nav_repeat(b, sdir, 280, rep, true);
-        return;
-    }
-    nav_repeat(b, sdir, 280, rep, false);
+    process_gamepad(b);
 }
 
 void backend_text_input(bool enabled)
@@ -661,6 +687,19 @@ void backend_text_input(bool enabled)
 }
 
 /* ── Init / present / shutdown ─────────────────────────────────────────────── */
+
+static float g_render_scale = 1.0f;
+
+static void scale_size(int *w, int *h)
+{
+    float s = g_render_scale;
+    int sw = (int)((float)*w * s) & ~1;
+    int sh = (int)((float)*h * s) & ~1;
+    if (sw < 640) sw = 640;
+    if (sh < 360) sh = 360;
+    *w = sw;
+    *h = sh;
+}
 
 bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *userdata)
 {
@@ -673,6 +712,13 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
     b->controller_id = -1;
     b->controller_family = 0;
 
+    {
+        const char *rs = getenv("TAJI_RENDER_SCALE");
+        if (rs && *rs) {
+            float v = (float)atof(rs);
+            if (v >= 0.5f && v <= 1.0f) g_render_scale = v;
+        }
+    }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[taiji] SDL_Init failed: %s\n", SDL_GetError());
         return false;
@@ -696,6 +742,18 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
         fprintf(stderr, "[taiji] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
     }
+    {
+        SDL_DisplayMode dm;
+        int di = SDL_GetWindowDisplayIndex(b->window);
+        g_refresh_detected = 60;
+        if (di >= 0 && SDL_GetCurrentDisplayMode(di, &dm) == 0 &&
+            dm.refresh_rate > 0)
+            g_refresh_detected = dm.refresh_rate;
+        g_refresh_effective = g_refresh_limit > 0 ? g_refresh_limit
+                                                  : g_refresh_detected;
+        fprintf(stderr, "[taiji] display refresh: %d Hz (limit %d)\n",
+                g_refresh_detected, g_refresh_limit);
+    }
     SDL_SetRelativeMouseMode(SDL_FALSE);
     SDL_SetWindowGrab(b->window, SDL_FALSE);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
@@ -708,8 +766,18 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
         fprintf(stderr, "[taiji] SDL_CreateRenderer failed: %s\n", SDL_GetError());
         return false;
     }
+    {
+        SDL_RendererInfo ri;
+        if (SDL_GetRendererInfo(b->renderer, &ri) == 0) {
+            g_renderer_vsync =
+                (ri.flags & SDL_RENDERER_PRESENTVSYNC) != 0;
+            if (ri.name && strstr(ri.name, "opengl"))
+                SDL_GL_SetSwapInterval(1);
+        }
+    }
     int draw_w = width, draw_h = height;
     backend_output_size(b, &draw_w, &draw_h);
+    scale_size(&draw_w, &draw_h);
     if (draw_w < 320) draw_w = 320;
     if (draw_h < 240) draw_h = 240;
     b->width = draw_w;
@@ -739,7 +807,11 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
     lv_display_set_buffers(b->display, b->framebuffer, NULL, fb_bytes, LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(b->display, flush_cb);
     lv_display_set_default(b->display);
-
+    {
+        lv_timer_t *rt = lv_display_get_refr_timer(b->display);
+        if (rt && g_refresh_effective > 0)
+            lv_timer_set_period(rt, (uint32_t)(1000 / g_refresh_effective));
+    }
     b->pointer = lv_indev_create();
     lv_indev_set_type(b->pointer, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(b->pointer, pointer_read_cb);
@@ -754,6 +826,7 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
 
 static void backend_apply_size(Backend *b, int w, int h)
 {
+    scale_size(&w, &h);
     if (w < 320) w = 320;
     if (h < 240) h = 240;
     if (w == b->width && h == b->height) return;
@@ -795,13 +868,71 @@ void backend_refresh_size(Backend *b)
 
 void backend_present(Backend *b)
 {
-    if (!b->needs_present) return;
+    /* Always submit a frame at the display refresh rate. Submitting only when
+     * something changed made the 120 Hz compositor schedule sparse frames
+     * badly, which looked like the focus jumping backwards. */
     b->needs_present = false;
     SDL_UpdateTexture(b->texture, NULL, b->framebuffer, b->width * 4);
     SDL_SetRenderDrawColor(b->renderer, 5, 6, 10, 255);
     SDL_RenderClear(b->renderer);
     SDL_RenderCopy(b->renderer, b->texture, NULL, NULL);
     SDL_RenderPresent(b->renderer);
+
+    {
+        const char *cap_env = getenv("TAJI_FPS_CAP");
+        bool force_cap = cap_env && *cap_env;
+        /* VSync already paces the renderer. Sleeping here adds another frame
+         * of input latency in Auto mode. Only cap when the user picked an
+         * explicit refresh limit or the renderer has no vsync. */
+        if (force_cap || g_refresh_limit > 0 || !g_renderer_vsync) {
+            int cap = force_cap ? atoi(cap_env) : g_refresh_effective;
+            if (cap > 0) {
+                static uint32_t last_present;
+                uint32_t interval = 1000u / (uint32_t)cap;
+                uint32_t now = SDL_GetTicks();
+                if (last_present &&
+                    (int32_t)(now - last_present) < (int32_t)interval)
+                    SDL_Delay(interval - (now - last_present));
+                last_present = SDL_GetTicks();
+            }
+        }
+    }
+}
+
+void backend_set_render_scale(Backend *b, int percent)
+{
+    if (percent < 50) percent = 50;
+    if (percent > 100) percent = 100;
+    g_render_scale = (float)percent / 100.0f;
+    if (b) backend_refresh_size(b);
+    fprintf(stderr, "[taiji] render scale: %d%%\n", percent);
+}
+
+int backend_render_scale_percent(Backend *b)
+{
+    (void)b;
+    return (int)(g_render_scale * 100.0f + 0.5f);
+}
+
+int backend_display_refresh_hz(Backend *b)
+{
+    (void)b;
+    return g_refresh_detected;
+}
+
+void backend_set_refresh_limit(Backend *b, int hz)
+{
+    if (hz != 0 && hz != 60 && hz != 120) hz = 0;
+    g_refresh_limit = hz;
+    g_refresh_effective = g_refresh_limit > 0 ? g_refresh_limit
+                                              : g_refresh_detected;
+    if (b && b->display) {
+        lv_timer_t *rt = lv_display_get_refr_timer(b->display);
+        if (rt && g_refresh_effective > 0)
+            lv_timer_set_period(rt, (uint32_t)(1000 / g_refresh_effective));
+    }
+    fprintf(stderr, "[taiji] refresh limit: %d Hz (effective %d)\n",
+            g_refresh_limit, g_refresh_effective);
 }
 
 void backend_toggle_fullscreen(Backend *b)
