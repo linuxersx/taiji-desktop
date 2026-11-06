@@ -18,6 +18,36 @@
 #include <time.h>
 #include <unistd.h>
 
+void taiji_debug_log(const char *fmt, ...)
+{
+    const char *env = getenv("TAIJI_INPUT_DEBUG");
+    if (!env || !*env || strcmp(env, "0") == 0) return;
+
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    fprintf(stderr, "[input] %s\n", line);
+
+    char path[PATH_MAX];
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (rt && *rt)
+        snprintf(path, sizeof(path), "%s/taiji/input-debug.log", rt);
+    else
+        snprintf(path, sizeof(path), "/tmp/taiji-input-debug.log");
+    char *dir = path_dirname_dup(path);
+    if (dir) { mkdir_p(dir); free(dir); }
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    fprintf(f, "%ld.%03ld %s\n", (long)ts.tv_sec,
+            (long)(ts.tv_nsec / 1000000), line);
+    fclose(f);
+}
+
 void *xmalloc(size_t n)
 {
     void *p = malloc(n ? n : 1);

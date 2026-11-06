@@ -371,16 +371,22 @@ void app_goto_screen(App *app, Screen screen)
     } else if (screen == SCREEN_APPS) {
         app->app_badge = false;
         app->apps_refresh_pending = false;
-        snprintf(app->app_cat, sizeof(app->app_cat), "all");
-        app->app_cat_focus = 0;
+        /* Only the first visit starts at "all" / the first app. Switching away
+         * with L/R and coming back must keep the category and focus, otherwise
+         * the page appears to spring back. */
+        if (!app->apps_visited) {
+            app->apps_visited = true;
+            snprintf(app->app_cat, sizeof(app->app_cat), "all");
+            app->app_cat_focus = 0;
+            app->app_focus = 0;
+            app->app_page = 0;
+            app->app_reset_focus = true;
+        }
 #ifdef __linux__
         app_desktop_scan_start(app, false);
 #endif
         app_filter_apps(app);
         app->app_on_categories = false;
-        app->app_focus = 0;
-        app->app_page = 0;
-        app->app_reset_focus = true;
         apps_runtime_read(&app->runtime);
     } else if (screen == SCREEN_STORE) {
         app->store_on_sidebar = false;
@@ -572,10 +578,13 @@ void app_set_app_category(App *app, const char *id)
 {
     snprintf(app->app_cat, sizeof(app->app_cat), "%s", id && *id ? id : "all");
     app->app_cat_focus = apps_category_index(app->app_cat);
-    app->app_focus = 0;
-    app->app_page = 0;
-    app->app_on_categories = false;
+    /* Keep the current position when switching categories. app_filter_apps
+     * clamps to the new count, so the focus lands on the closest card instead
+     * of always jumping back to the first one. */
     app_filter_apps(app);
+    app->app_on_categories = false;
+    taiji_debug_log("category=%s focus=%d count=%d", app->app_cat,
+                    app->app_focus, app->app_filter_count);
     app_rebuild(app);
 }
 
@@ -3480,6 +3489,8 @@ static void input_apps(App *app, InputAction action)
 
     if (app->app_focus >= count) app->app_focus = count > 0 ? count - 1 : 0;
     if (app->app_focus < 0) app->app_focus = 0;
+    taiji_debug_log("apps action=%d focus=%d count=%d cat=%s cols=%d",
+                    (int)action, app->app_focus, count, app->app_cat, cols);
     ui_update_apps(app);
     audio_play(SND_NAV);
 }

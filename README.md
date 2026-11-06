@@ -595,7 +595,7 @@ sudo apt install build-essential cmake pkg-config libsdl2-dev
 不会再下载 `base-devel` / `fakeroot`。生成的包在：
 
 ```text
-packaging/arch-bin/taiji-bin-1.0.0-153-aarch64.pkg.tar.zst
+packaging/arch-bin/taiji-bin-1.0.0-154-aarch64.pkg.tar.zst
 ```
 
 依赖由 `PKGBUILD` 声明，包括 SDL2、libpng、SDDM、sway、xorg-server、weston（登录界面）、

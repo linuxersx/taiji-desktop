@@ -57,4 +57,8 @@ uint32_t fnv1a(const char *s);
 uint32_t color_blend(uint32_t a, uint32_t b, int t); /* 0..255 */
 uint32_t color_alpha(uint32_t color, uint8_t alpha);
 
+/* Gated by TAIJI_INPUT_DEBUG=1: append one line to the runtime debug log and
+ * also mirror it to stderr. */
+void taiji_debug_log(const char *fmt, ...);
+
 #endif

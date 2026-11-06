@@ -255,6 +255,7 @@ typedef struct App {
     int app_cat_focus;
     bool app_on_categories;
     bool app_reset_focus;
+    bool apps_visited;
     bool nav_on_bar;
     bool modal_closing;
     int nav_focus;
