@@ -64,7 +64,7 @@ x86_64 需要在 x86_64 环境重新生成二进制 payload，不能直接使用
 ### 3.2 在目标系统上安装
 
 ```bash
-sudo pacman -U packaging/arch-bin/taiji-bin-1.0.0-154-aarch64.pkg.tar.zst
+sudo pacman -U packaging/arch-bin/taiji-bin-1.0.0-156-aarch64.pkg.tar.zst
 ```
 
 ### 3.3 安装到离线 rootfs
@@ -75,7 +75,7 @@ sudo pacman -U packaging/arch-bin/taiji-bin-1.0.0-154-aarch64.pkg.tar.zst
 pacman --root "$ROOTFS" \
   --dbpath "$ROOTFS/var/lib/pacman" \
   --cachedir /var/cache/pacman/pkg \
-  -U /path/to/taiji-bin-1.0.0-154-aarch64.pkg.tar.zst
+  -U /path/to/taiji-bin-1.0.0-156-aarch64.pkg.tar.zst
 ```
 
 如果 rootfs 还没有包数据库，直接解包 payload：

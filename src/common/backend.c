@@ -153,6 +153,9 @@ int backend_take_captured_button(void)
 
 /* ── Input helpers ─────────────────────────────────────────────────────────── */
 
+static float g_sdl_axis_x;
+static float g_sdl_axis_y;
+
 static void emit(Backend *b, InputAction a, const char *text)
 {
     if (b->input_cb) b->input_cb(b->input_userdata, a, text);
@@ -216,6 +219,10 @@ static void open_controller(Backend *b, int index)
             b->controller_family = 3;
         }
     }
+    g_sdl_axis_x = (float)SDL_GameControllerGetAxis(
+                        b->controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+    g_sdl_axis_y = (float)SDL_GameControllerGetAxis(
+                        b->controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
     SDL_GameControllerEventState(SDL_ENABLE);
     fprintf(stderr, "[taiji] controller connected: %s\n", b->controller_name);
 }
@@ -267,10 +274,10 @@ typedef struct {
     int dir;                 /* currently repeating direction */
     uint32_t next_repeat;
     uint32_t repeat_ms;
-    int dpad_last;
+    uint32_t dpad_held;      /* bitmask, bit == InputAction */
+    int dpad_dir;            /* most recently pressed held direction */
     int kbd_last;
     int stick_candidate;
-    uint32_t candidate_since;
     int stick_axis;          /* 0 none, 1 horizontal, 2 vertical */
     uint32_t stick_lock_until;
 } NavRepeat;
@@ -315,6 +322,57 @@ static void nav_repeat(Backend *b, int dir, uint32_t first_ms,
                         (unsigned)repeat_ms);
         emit(b, (InputAction)dir, NULL);
         g_nav.next_repeat = now + g_nav.repeat_ms;
+    }
+}
+
+static int dpad_bit(int dir)
+{
+    return dir > 0 && dir <= IN_RIGHT ? (1 << dir) : 0;
+}
+
+static int dpad_from_button(int btn)
+{
+    switch (btn) {
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: return IN_UP;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return IN_DOWN;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return IN_LEFT;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return IN_RIGHT;
+        default: return 0;
+    }
+}
+
+static int dpad_current(void)
+{
+    if (g_nav.dpad_held & dpad_bit(IN_UP)) return IN_UP;
+    if (g_nav.dpad_held & dpad_bit(IN_DOWN)) return IN_DOWN;
+    if (g_nav.dpad_held & dpad_bit(IN_LEFT)) return IN_LEFT;
+    if (g_nav.dpad_held & dpad_bit(IN_RIGHT)) return IN_RIGHT;
+    return 0;
+}
+
+/* D-pad presses arrive as SDL button events; polling GetButton misses the
+ * release/re-press pairs produced by this controller, which left the old
+ * repeat timer running and moved one extra cell. */
+static void handle_dpad_button(Backend *b, int dir, bool down)
+{
+    uint32_t now = SDL_GetTicks();
+    int bit = dpad_bit(dir);
+    if (!bit) return;
+    if (down) {
+        /* Pass every SDL press straight through. */
+        g_nav.dpad_held |= bit;
+        g_nav.dpad_dir = dir;
+        g_nav.dir = 0;
+        g_nav.stick_candidate = 0;
+        g_nav.stick_lock_until = now + 120;
+        taiji_debug_log("dpad %s (down)", dir_name(dir));
+        nav_repeat(b, dir, 300, 90, true);
+    } else {
+        g_nav.dpad_held &= ~bit;
+        if (g_nav.dpad_dir == dir) g_nav.dpad_dir = dpad_current();
+        if (!g_nav.dpad_dir) g_nav.dir = 0;
+        g_nav.stick_lock_until = now + 120;
+        taiji_debug_log("dpad %s (up)", dir_name(dir));
     }
 }
 
@@ -465,6 +523,30 @@ void backend_poll(Backend *b)
             case SDL_FINGERUP:
                 handle_touch(b, &e.tfinger, false, true);
                 break;
+            case SDL_CONTROLLERAXISMOTION:
+                if (e.caxis.which != b->controller_id) break;
+                if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+                    g_sdl_axis_x = (float)e.caxis.value / 32767.0f;
+                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                    g_sdl_axis_y = (float)e.caxis.value / 32767.0f;
+                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT) {
+                    if (e.caxis.value > 18000 && !g_lt_held) {
+                        taiji_debug_log("trigger LT");
+                        emit(b, IN_LT, NULL);
+                        g_lt_held = true;
+                    } else if (e.caxis.value < 14000) {
+                        g_lt_held = false;
+                    }
+                } else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+                    if (e.caxis.value > 18000 && !g_rt_held) {
+                        taiji_debug_log("trigger RT");
+                        emit(b, IN_RT, NULL);
+                        g_rt_held = true;
+                    } else if (e.caxis.value < 14000) {
+                        g_rt_held = false;
+                    }
+                }
+                break;
             case SDL_CONTROLLERDEVICEADDED:
                 open_controller(b, e.cdevice.which);
                 break;
@@ -478,15 +560,15 @@ void backend_poll(Backend *b)
                 bool down = e.type == SDL_CONTROLLERBUTTONDOWN;
                 taiji_debug_log("button which=%d btn=%d value=%d",
                                 (int)e.cbutton.which, btn, down ? 1 : 0);
+                int dpad_dir = dpad_from_button(btn);
+                if (dpad_dir) {
+                    handle_dpad_button(b, dpad_dir, down);
+                    break;
+                }
                 if (!down) break;
                 InputAction a = map_face_button(b, btn, down);
                 if (a != IN_NONE) { emit(b, a, NULL); break; }
                 switch (btn) {
-                    case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                        break; /* handled continuously below */
                     case SDL_CONTROLLER_BUTTON_START: emit(b, IN_START, NULL); break;
                     case SDL_CONTROLLER_BUTTON_BACK: emit(b, IN_SELECT, NULL); break;
                     case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: emit(b, IN_LB, NULL); break;
@@ -496,27 +578,6 @@ void backend_poll(Backend *b)
                 break;
             }
             default: break;
-        }
-    }
-
-    /* Analog triggers (L2/R2). Release hysteresis prevents retriggering when
-     * the analog value hovers around the threshold. */
-    if (b->controller) {
-        int lt = SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-        int rt = SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-        if (lt > 18000 && !g_lt_held) {
-            taiji_debug_log("trigger LT");
-            emit(b, IN_LT, NULL);
-            g_lt_held = true;
-        } else if (lt < 14000) {
-            g_lt_held = false;
-        }
-        if (rt > 18000 && !g_rt_held) {
-            taiji_debug_log("trigger RT");
-            emit(b, IN_RT, NULL);
-            g_rt_held = true;
-        } else if (rt < 14000) {
-            g_rt_held = false;
         }
     }
 
@@ -540,32 +601,9 @@ void backend_poll(Backend *b)
         return;
     }
 
-    /* D-pad: emit once on the press edge, pause, then repeat while held. */
-    int dpad = 0;
-    if (b->controller) {
-        if (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_DPAD_UP))
-            dpad = IN_UP;
-        else if (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN))
-            dpad = IN_DOWN;
-        else if (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT))
-            dpad = IN_LEFT;
-        else if (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
-            dpad = IN_RIGHT;
-    }
     uint32_t now = SDL_GetTicks();
-    if (dpad != g_nav.dpad_last) {
-        g_nav.dpad_last = dpad;
-        g_nav.dir = 0;
-        g_nav.stick_candidate = 0;
-        g_nav.stick_lock_until = now + 150;
-        if (dpad) {
-            taiji_debug_log("dpad %s (edge)", dir_name(dpad));
-            nav_repeat(b, dpad, 300, 90, true);
-        }
-        return;
-    }
-    if (dpad) {
-        nav_repeat(b, dpad, 300, 90, false);
+    if (g_nav.dpad_dir) {
+        nav_repeat(b, g_nav.dpad_dir, 300, 90, false);
         return;
     }
 
@@ -578,8 +616,8 @@ void backend_poll(Backend *b)
         g_nav.stick_candidate = 0;
         return;
     }
-    float ax = (float)SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-    float ay = (float)SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+    float ax = g_sdl_axis_x;
+    float ay = g_sdl_axis_y;
     float aax = fabsf(ax);
     float aay = fabsf(ay);
     float mag = aax > aay ? aax : aay;
@@ -602,19 +640,18 @@ void backend_poll(Backend *b)
     }
     int sdir = axis == 1 ? (ax < 0 ? IN_LEFT : IN_RIGHT)
                          : (ay < 0 ? IN_UP : IN_DOWN);
-    if (sdir != g_nav.stick_candidate) {
-        g_nav.stick_candidate = sdir;
-        g_nav.candidate_since = now;
-        g_nav.dir = 0;
-        taiji_debug_log("stick candidate %s (mag %.2f)", dir_name(sdir), mag);
-        return;
-    }
-    if ((int32_t)(now - g_nav.candidate_since) < 80) return;
     float t = (primary - 0.30f) / 0.70f;
     if (t < 0) t = 0;
     if (t > 1) t = 1;
     uint32_t rep = (uint32_t)(110.0f - 55.0f * t);
-    nav_repeat(b, sdir, 280, rep, true);
+    if (sdir != g_nav.stick_candidate) {
+        g_nav.stick_candidate = sdir;
+        g_nav.dir = 0;
+        taiji_debug_log("stick %s (mag %.2f)", dir_name(sdir), mag);
+        nav_repeat(b, sdir, 280, rep, true);
+        return;
+    }
+    nav_repeat(b, sdir, 280, rep, false);
 }
 
 void backend_text_input(bool enabled)

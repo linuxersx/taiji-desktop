@@ -556,8 +556,10 @@ void app_filter_apps(App *app)
             app->app_filter[app->app_filter_count++] = i;
         }
     }
-    if (app->app_focus >= app->app_filter_count)
-        app->app_focus = app->app_filter_count > 0 ? app->app_filter_count - 1 : 0;
+    /* Keep the focus across an empty category. Clamping it to 0 here made
+     * L2/R2 return to the first app when a category had no entries. */
+    if (app->app_filter_count > 0 && app->app_focus >= app->app_filter_count)
+        app->app_focus = app->app_filter_count - 1;
     if (app->app_focus < 0) app->app_focus = 0;
 }
 
@@ -3396,11 +3398,21 @@ static void input_games(App *app, InputAction action)
     }
 }
 
+static int app_category_count(App *app, const char *id)
+{
+    int n = 0;
+    for (int i = 0; i < app->apps.count; i++) {
+        if (apps_category_matches(&app->apps.apps[i], id)) n++;
+    }
+    return n;
+}
+
 static void input_apps(App *app, InputAction action)
 {
     int count = app->app_filter_count;
     int cols = app->layout.app_cols > 0 ? app->layout.app_cols : 3;
     int cats = apps_category_count();
+    int focus_before = app->app_focus;
 
     if (app->app_on_categories) {
         if (action == IN_LEFT) {
@@ -3448,14 +3460,23 @@ static void input_apps(App *app, InputAction action)
         app->app_focus -= cols;
     }
     if (action == IN_LT || action == IN_RT) {
+        int step = action == IN_LT ? -1 : 1;
         int cat = apps_category_index(app->app_cat);
-        cat = (cat + (action == IN_LT ? -1 : 1) + cats) % cats;
-        app_set_app_category(app, apps_category_id(cat));
+        int chosen = cat;
+        for (int i = 0; i < cats; i++) {
+            cat = (cat + step + cats) % cats;
+            if (app_category_count(app, apps_category_id(cat)) > 0) {
+                chosen = cat;
+                break;
+            }
+        }
+        app_set_app_category(app, apps_category_id(chosen));
         audio_play(SND_NAV);
         return;
     }
     if (action == IN_LEFT && app->app_focus % cols > 0) app->app_focus--;
-    else if (action == IN_RIGHT && (app->app_focus % cols) < cols - 1 && app->app_focus + 1 < count) app->app_focus++;
+    else if (action == IN_RIGHT && (app->app_focus % cols) < cols - 1 &&
+             app->app_focus + 1 < count) app->app_focus++;
     else if (action == IN_DOWN && app->app_focus + cols < count) app->app_focus += cols;
     else if (action == IN_CONFIRM || action == IN_A) {
         audio_play(SND_ENTER);
@@ -3491,8 +3512,10 @@ static void input_apps(App *app, InputAction action)
     if (app->app_focus < 0) app->app_focus = 0;
     taiji_debug_log("apps action=%d focus=%d count=%d cat=%s cols=%d",
                     (int)action, app->app_focus, count, app->app_cat, cols);
-    ui_update_apps(app);
-    audio_play(SND_NAV);
+    if (app->app_focus != focus_before) {
+        ui_update_apps(app);
+        audio_play(SND_NAV);
+    }
 }
 
 static void modal_app_input(App *app, InputAction action)
