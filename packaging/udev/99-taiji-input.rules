@@ -4,3 +4,6 @@ KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
 
 # Let the seat user read the framebuffer for multitask thumbnails.
 KERNEL=="fb0", SUBSYSTEM=="graphics", TAG+="uaccess"
+
+# Let the active seat user adjust the panel backlight.
+SUBSYSTEM=="backlight", ACTION=="add|change", RUN+="/bin/sh -c 'chgrp seat /sys/class/backlight/%k/brightness 2>/dev/null; chmod 0660 /sys/class/backlight/%k/brightness 2>/dev/null'"

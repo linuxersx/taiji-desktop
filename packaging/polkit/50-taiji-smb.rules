@@ -1,0 +1,9 @@
+// Allow the active local session to manage local SMB shares through the
+// Taiji SMB helper. The helper validates paths and share names.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/libexec/taiji/taiji-smb-helper" &&
+        subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

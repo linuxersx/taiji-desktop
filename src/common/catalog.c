@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "catalog.h"
+#include "libretro.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -326,6 +327,93 @@ static bool mac_app(const char *name)
     return ok;
 }
 
+/* Cores known to work with each platform, most recommended first.  The list is
+ * filtered against installed cores before use; it also feeds the core picker. */
+typedef struct {
+    const char *id;
+    const char *cores[8];
+} CoreMap;
+
+static const CoreMap CORE_MAP[] = {
+    {"nes",     {"mesen", "nestopia", "quicknes", "fceumm", "bnes", NULL}},
+    {"snes",    {"snes9x", "bsnes", "bsnes_hd_beta", "mesen-s", NULL}},
+    {"n64",     {"mupen64plus_next", "parallel_n64", NULL}},
+    {"gb",      {"gambatte", "sameboy", "gearboy", NULL}},
+    {"gbc",     {"gambatte", "sameboy", "gearboy", NULL}},
+    {"gba",     {"mgba", "vba_next", NULL}},
+    {"nds",     {"melonds", "desmume", NULL}},
+    {"ps1",     {"mednafen_psx_hw", "mednafen_psx", "pcsx_rearmed", "duckstation", NULL}},
+    {"ps2",     {"play", "pcsx2", NULL}},
+    {"gc",      {"dolphin", NULL}},
+    {"wii",     {"dolphin", NULL}},
+    {"arcade",  {"mame", "fbneo", "mame2003_plus", NULL}},
+    {"neogeo",  {"mame", "fbneo", NULL}},
+    {"md",      {"genesis_plus_gx", "picodrive", "blastem", NULL}},
+    {"smc",     {"genesis_plus_gx", "picodrive", "gearsystem", "smsplus", NULL}},
+    {"gg",      {"genesis_plus_gx", "picodrive", "gearsystem", NULL}},
+    {"scd",     {"genesis_plus_gx", "picodrive", NULL}},
+    {"32x",     {"picodrive", "genesis_plus_gx", NULL}},
+    {"dc",      {"flycast", NULL}},
+    {"naomi",   {"flycast", NULL}},
+    {"sat",     {"kronos", "yabause", "mednafen_saturn", NULL}},
+    {"pce",     {"mednafen_pce", "mednafen_pce_fast", "mednafen_supergrafx", NULL}},
+    {"pcecd",   {"mednafen_pce", "mednafen_pce_fast", NULL}},
+    {"pcfx",    {"mednafen_pcfx", NULL}},
+    {"scummvm", {"scummvm", NULL}},
+    {"vb",      {"mednafen_vb", NULL}},
+    {"ngp",     {"mednafen_ngp", "race", NULL}},
+    {"ngpc",    {"mednafen_ngp", "race", NULL}},
+    {"ws",      {"mednafen_wswan", NULL}},
+    {"wsc",     {"mednafen_wswan", NULL}},
+    {"msx",     {"bluemsx", NULL}},
+    {"c64",     {"vice_x64", NULL}},
+    {"amiga",   {"puae", NULL}},
+    {"dos",     {"dosbox_pure", NULL}},
+    {"atari2600", {"stella", "stella2014", NULL}},
+    {"atari5200", {"a5200", NULL}},
+    {"atari7800", {"prosystem", NULL}},
+    {"lynx",    {"handy", NULL}},
+    {"jaguar",  {"virtualjaguar", NULL}},
+    {"3do",     {"opera", NULL}},
+    {"cdi",     {"same_cdi", NULL}},
+    {"cv",      {"bluemsx", NULL}},
+    {"intv",    {"freeintv", NULL}},
+    {"vect",    {"vecx", NULL}},
+    {"zxspectrum", {"fuse", NULL}},
+    {"cpc",     {"crocods", NULL}},
+    {"bbcmicro", {"b2", NULL}},
+    {"apple2",  {"apple2", NULL}},
+    {"pc98",    {"np2kai", NULL}},
+    {"x68000",  {"px68k", NULL}},
+    {"pico8",   {"pico8", NULL}},
+    {"tic80",   {"tic80", NULL}},
+    {"3ds",     {"citra", NULL}},
+};
+
+int catalog_core_candidates(const char *id, const char **out, int max)
+{
+    if (!id || !out || max <= 0) return 0;
+    for (size_t i = 0; i < sizeof(CORE_MAP) / sizeof(CORE_MAP[0]); i++) {
+        if (!str_ieq(id, CORE_MAP[i].id)) continue;
+        int n = 0;
+        for (int j = 0; j < 8 && CORE_MAP[i].cores[j] && n < max; j++)
+            out[n++] = CORE_MAP[i].cores[j];
+        return n;
+    }
+    return 0;
+}
+
+static char *retroarch_command_for(const char *id)
+{
+    LibretroCore cores[64];
+    int n = libretro_compatible(id, cores, 64);
+    if (n <= 0) return NULL;
+    char *quoted = shell_quote(cores[0].path);
+    char *cmd = xasprintf("retroarch -L %s %%ROM%%", quoted);
+    free(quoted);
+    return cmd;
+}
+
 char *catalog_default_command(const char *id, bool mac)
 {
     if (mac) {
@@ -358,7 +446,12 @@ char *catalog_default_command(const char *id, bool mac)
     else if (str_ieq(id, "arcade") || str_ieq(id, "neogeo")) { wanted[0] = "mame"; wanted[1] = "retroarch"; }
     else { wanted[0] = "retroarch"; wanted[1] = "mame"; }
     for (int i = 0; i < 3; i++) {
-        if (wanted[i] && which_cmd(wanted[i])) return xasprintf("%s %%ROM%%", wanted[i]);
+        if (!wanted[i] || !which_cmd(wanted[i])) continue;
+        if (strcmp(wanted[i], "retroarch") == 0) {
+            char *cmd = retroarch_command_for(id);
+            if (cmd) return cmd;
+        }
+        return xasprintf("%s %%ROM%%", wanted[i]);
     }
     return xstrdup("xdg-open %ROM%");
 }

@@ -12,15 +12,52 @@
 typedef struct {
     App *app;
     int index;
+    bool pressed;
+    bool long_fired;
+    uint32_t press_ms;
 } GameClickCtx;
 
 static const char *g_sort_names[] = {"名称", "最近游玩", "最多游玩", "收藏优先"};
 static const char *g_filter_names[] = {"全部", "仅收藏", "未游玩", "多人"};
 
+static void game_pressed(lv_event_t *e)
+{
+    GameClickCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    ctx->pressed = true;
+    ctx->press_ms = lv_tick_get();
+}
+
+static void game_released(lv_event_t *e)
+{
+    GameClickCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx || !ctx->pressed) return;
+    ctx->pressed = false;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev && (lv_indev_get_scroll_obj(indev) ||
+                  lv_indev_get_scroll_dir(indev) != LV_DIR_NONE ||
+                  lv_indev_get_gesture_dir(indev) != LV_DIR_NONE))
+        return;
+    if (lv_tick_get() - ctx->press_ms < 450) return;
+    App *app = ctx->app;
+    ctx->long_fired = true;
+    app->game_focus = ctx->index;
+    Game *g = app_selected_game(app);
+    if (g) snprintf(app->selected_game_id, sizeof(app->selected_game_id), "%s", g->id);
+    ui_update_games(app);
+    audio_play(SND_NAV_STRONG);
+    app->modal = MODAL_DETAIL;
+    ui_build_modal(app);
+}
+
 static void game_clicked(lv_event_t *e)
 {
     GameClickCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
+    if (ctx->long_fired) {
+        ctx->long_fired = false;
+        return;
+    }
     App *app = ctx->app;
     if (app->game_focus != ctx->index) {
         app->game_focus = ctx->index;
@@ -96,14 +133,14 @@ static void apply_panel(App *app, Game *g)
     lv_label_set_text(ui->game_detail_title, g->name);
     char meta[512];
     const char *platform = catalog_zh_name(g->platform_id);
-    if (g->release_date[0]) {
+    if (g->release_date && g->release_date[0]) {
         snprintf(meta, sizeof(meta), "%s  /  %s  /  %d 人", platform, g->release_date, g->players > 0 ? g->players : 1);
     } else {
         snprintf(meta, sizeof(meta), "%s  /  %d 人", platform, g->players > 0 ? g->players : 1);
     }
     lv_label_set_text(ui->game_detail_meta, meta);
     lv_label_set_text(ui->game_detail_desc,
-                      g->description[0] ? g->description : "暂无游戏简介。");
+                      g->description && g->description[0] ? g->description : "暂无游戏简介。");
     char stats[256];
     char *played = format_playtime(g->play_seconds);
     snprintf(stats, sizeof(stats), "游玩 %d 次  /  %s", g->play_count, played);
@@ -115,9 +152,10 @@ static void apply_panel(App *app, Game *g)
     int cw = lv_obj_get_width(wrap);
     int ch = lv_obj_get_height(wrap);
     if (lv_obj_get_child_count(wrap) > 0) lv_obj_clean(wrap);
-    if (g->cover_path[0] && file_exists(g->cover_path)) {
+    if (g->cover_path && g->cover_path[0] && file_exists(g->cover_path)) {
         char *src = ui_img_src(g->cover_path);
         lv_obj_t *img = lv_image_create(wrap);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_size(img, cw, ch);
         lv_obj_center(img);
@@ -160,7 +198,7 @@ static void build_card(App *app, GameList *list, int idx, int x, int y, int cell
     int ix = (cell_w - img) / 2;
     lv_obj_t *wrap = ui_rect(card, ix, 0, img, img, 14, PAL.card);
     lv_obj_set_style_clip_corner(wrap, true, 0);
-    if (g->cover_path[0] && file_exists(g->cover_path)) {
+    if (g->cover_path && g->cover_path[0] && file_exists(g->cover_path)) {
         lv_obj_t *im = ui_image(wrap, g->cover_path, 0, 0, img, img, 14, true);
         lv_obj_set_style_bg_opa(im, LV_OPA_TRANSP, 0);
     } else {
@@ -194,6 +232,11 @@ static void build_card(App *app, GameList *list, int idx, int x, int y, int cell
     GameClickCtx *ctx = xmalloc(sizeof(*ctx));
     ctx->app = app;
     ctx->index = idx;
+    ctx->pressed = false;
+    ctx->long_fired = false;
+    ctx->press_ms = 0;
+    lv_obj_add_event_cb(card, game_pressed, LV_EVENT_PRESSED, ctx);
+    lv_obj_add_event_cb(card, game_released, LV_EVENT_RELEASED, ctx);
     lv_obj_add_event_cb(card, game_clicked, LV_EVENT_CLICKED, ctx);
     lv_obj_add_event_cb(card, game_ctx_free, LV_EVENT_DELETE, ctx);
 }
@@ -282,6 +325,13 @@ static void build_header(App *app, const char *collection_id, int count)
     }
 }
 
+static void game_fav_badge_clicked(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    Game *g = app_selected_game(app);
+    if (g) app_toggle_favorite(app, g);
+}
+
 static void build_cover_panel(App *app)
 {
     UiLayout *L = &app->layout;
@@ -317,6 +367,9 @@ static void build_cover_panel(App *app)
     int bw = ui_clamp(L->panel_w * 12 / 100, 36, 48);
     app->ui.game_fav_badge = ui_rect(panel, L->panel_w - bw - inner, inner, bw, 28,
                                      bw / 2, PAL.accent);
+    lv_obj_add_flag(app->ui.game_fav_badge, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(app->ui.game_fav_badge, game_fav_badge_clicked,
+                        LV_EVENT_CLICKED, app);
     lv_obj_set_style_bg_opa(app->ui.game_fav_badge, 0, 0);
     lv_obj_set_style_border_width(app->ui.game_fav_badge, 1, 0);
     lv_obj_set_style_border_color(app->ui.game_fav_badge, lv_color_hex(PAL.accent), 0);
@@ -329,22 +382,27 @@ static void build_cover_panel(App *app)
 
 void ui_build_games(App *app, const char *collection_id)
 {
-    snprintf(app->collection_id, sizeof(app->collection_id), "%s", collection_id ? collection_id : "all");
-    Platform *p = library_find_platform(&app->library, collection_id);
+    /* Callers pass app->collection_id here, so copy through a local buffer
+     * first; snprintf() with the same source and destination is undefined and
+     * used to blank the collection id after entering a platform. */
+    char cid[sizeof(app->collection_id)];
+    snprintf(cid, sizeof(cid), "%s", collection_id && *collection_id ? collection_id : "all");
+    snprintf(app->collection_id, sizeof(app->collection_id), "%s", cid);
+    Platform *p = library_find_platform(&app->library, cid);
     Collection collections[128];
     int nc = app_collections(app, collections, 128);
     const char *title = NULL;
     const char *cover = NULL;
     uint32_t accent = PAL.accent;
     for (int i = 0; i < nc; i++) {
-        if (strcmp(collections[i].id, collection_id) == 0) {
+        if (strcmp(collections[i].id, cid) == 0) {
             title = collections[i].name;
             cover = collections[i].cover;
             accent = collections[i].accent;
             break;
         }
     }
-    GameList list = library_query(&app->library, collection_id,
+    GameList list = library_query(&app->library, cid,
                                   (SortMode)app->sort_mode, (FilterMode)app->filter_mode, NULL);
     if (title) snprintf(app->collection_name, sizeof(app->collection_name), "%s", title);
     else if (p) snprintf(app->collection_name, sizeof(app->collection_name), "%s", catalog_zh_name(p->id));
@@ -353,9 +411,11 @@ void ui_build_games(App *app, const char *collection_id)
     if (app->game_focus < 0) app->game_focus = 0;
 
     Game *sel = list.count ? list.items[app->game_focus] : NULL;
-    ui_screen_background(app, sel && sel->cover_path[0] ? sel->cover_path : cover, accent);
+    ui_screen_background(app,
+        sel && sel->cover_path && sel->cover_path[0] ? sel->cover_path : cover,
+        accent);
 
-    build_header(app, collection_id, list.count);
+    build_header(app, cid, list.count);
     if (list.count > 0) build_cover_panel(app);
 
     UiLayout *L = &app->layout;
@@ -408,8 +468,8 @@ void ui_build_games(App *app, const char *collection_id)
         lv_obj_t *key = ui_rect(btn, 12, (bh - ks) / 2, ks, ks, ks / 2, 0xFFF5F9FF);
         int key_h = ui_text_height(FONT_XS);
         int btn_text_h = ui_text_height(FONT_MD);
-        ui_label_center(key, "A", FONT_XS, PAL.accent, 0, (ks - key_h) / 2,
-                        ks, key_h);
+        ui_label_center(key, backend_button_confirm_label(&app->backend),
+                        FONT_XS, PAL.accent, 0, (ks - key_h) / 2, ks, key_h);
         ui_label_center(btn, "添加游戏目录", FONT_MD, 0xFFFFFFFF,
                         ks + 18, (bh - btn_text_h) / 2, bw - ks - 30,
                         btn_text_h);
@@ -420,7 +480,9 @@ void ui_build_games(App *app, const char *collection_id)
         lv_obj_set_style_shadow_spread(btn, 1, 0);
         lv_obj_add_event_cb(btn, empty_add_clicked, LV_EVENT_CLICKED, app);
         if (by + bh + 20 <= ph) {
-            ui_label_center(panel_obj, "按 A 添加游戏目录", FONT_XS,
+            char hint[64];
+            ui_button_hint(app, hint, sizeof(hint), "按 {A} 添加游戏目录");
+            ui_label_center(panel_obj, hint, FONT_XS,
                             PAL.accent2, 0, by + bh + 4, pw,
                             ui_text_height(FONT_XS));
         }
@@ -479,7 +541,8 @@ void ui_update_games(App *app)
     if (sel) {
         snprintf(app->selected_game_id, sizeof(app->selected_game_id), "%s", sel->id);
         apply_panel(app, sel);
-        if (!app->config.low_power && app->ui.bg_img && sel->cover_path[0]) {
+        if (!app->config.low_power && app->ui.bg_img &&
+            sel->cover_path && sel->cover_path[0]) {
             char *src = ui_img_src(sel->cover_path);
             lv_image_set_src(app->ui.bg_img, src);
             free(src);

@@ -1,7 +1,7 @@
 pkgbase = taiji-bin
 	pkgdesc = Taiji retro game library, app launcher and kiosk frontend (prebuilt aarch64)
 	pkgver = 1.0.0
-	pkgrel = 165
+	pkgrel = 184
 	install = taiji-bin.install
 	arch = aarch64
 	license = GPL-3.0-or-later
@@ -13,6 +13,8 @@ pkgbase = taiji-bin
 	depends = xdg-terminal-exec
 	depends = armdeck-usb-mtp
 	depends = flatpak
+	depends = samba
+	depends = avahi
 	depends = xorg-xwayland
 	depends = xorg-server
 	depends = networkmanager
@@ -61,6 +63,6 @@ pkgbase = taiji-bin
 	conflicts = taiji
 	backup = etc/sddm.conf.d/taiji.conf
 	source = taiji-1.0.0-aarch64.tar.gz
-	sha256sums = bfb8e22fac7c0ef462660708cd1e3628289ceb55ff6cb14d6caa68efea740302
+	sha256sums = bb40ef8c2d227bb7c360c09ae30f7cb2d1c999315974fb84fac0af4017c112b0
 
 pkgname = taiji-bin

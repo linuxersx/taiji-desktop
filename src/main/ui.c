@@ -14,6 +14,7 @@ static float g_sy = 1.0f;
 static float g_base_x = 1.0f;
 static float g_base_y = 1.0f;
 static bool g_low_power = false;
+static bool g_ui_building = false;
 
 static int sxv(int v) { return (int)lroundf((float)v * g_sx * g_base_x); }
 static int syv(int v) { return (int)lroundf((float)v * g_sy * g_base_y); }
@@ -41,6 +42,9 @@ lv_obj_t *ui_obj(lv_obj_t *parent, int x, int y, int w, int h, int radius, uint3
 {
     lv_obj_t *o = lv_obj_create(parent);
     lv_obj_remove_style_all(o);
+    /* Decorative rectangles must not swallow taps from the clickable card,
+     * row or button above them.  Interactive objects add CLICKABLE back. */
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
     x = sxv(x); y = syv(y); w = sxv(w); h = syv(h);
     if (radius > 0) radius = (int)lroundf((float)radius *
         (g_sx * g_base_x + g_sy * g_base_y) * 0.5f);
@@ -72,6 +76,7 @@ lv_obj_t *ui_label(lv_obj_t *parent, const char *text, lv_font_t *font,
 {
     lv_obj_t *l = lv_label_create(parent);
     lv_obj_remove_style_all(l);
+    lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
     lv_label_set_text(l, text ? tr(text) : "");
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
@@ -104,12 +109,15 @@ lv_obj_t *ui_image(lv_obj_t *parent, const char *path, int x, int y, int w, int 
 {
     lv_obj_t *wrap = ui_rect(parent, x, y, w, h, radius, PAL.card_soft);
     lv_obj_set_style_clip_corner(wrap, true, 0);
+    lv_obj_remove_flag(wrap, LV_OBJ_FLAG_CLICKABLE);
     if (!path || !*path || !file_exists(path)) {
         return wrap;
     }
     char *src = ui_img_src(path);
     lv_obj_t *img = lv_image_create(wrap);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_style_all(img);
+    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(img, sxv(w), syv(h));
     lv_obj_center(img);
     lv_image_set_src(img, src);
@@ -145,27 +153,114 @@ uint32_t ui_focus_accent(int index)
 void ui_set_focus_ring(lv_obj_t *obj, bool focused, uint32_t accent)
 {
     if (!obj) return;
-    /* 所有焦点框统一随机取色；按对象地址做稳定种子，避免刷新时跳色。 */
-    uint32_t ring = focused ? ui_focus_accent((int)((uintptr_t)obj >> 4)) : accent;
-    lv_obj_set_style_border_width(obj, focused ? 2 : 0, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(ring), 0);
-    lv_obj_set_style_border_opa(obj, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_shadow_width(obj, (focused && !g_low_power) ? 16 : 0, 0);
+    /* Keep the focus cue consistent and theme-aware.  Random per-object hues
+     * could blend into card backgrounds and made the ring hard to track. */
+    uint32_t ring = focused ? PAL.border_focus : accent;
+    /* Draw the ring as an outline rather than a border.  A border is part of
+     * the content box, so switching it on shifted absolutely positioned
+     * children (icons, labels) by the ring width and made the ring look
+     * off-centre.  outline_pad = -width keeps the stroke inside the object
+     * bounds, so the geometry matches the old border exactly. */
+    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_outline_width(obj, 4, 0);
+    lv_obj_set_style_outline_pad(obj, -4, 0);
+    lv_obj_set_style_outline_color(obj, lv_color_hex(ring), 0);
+    lv_obj_set_style_outline_opa(obj, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(obj, (focused && !g_low_power) ? 24 : 0, 0);
     lv_obj_set_style_shadow_color(obj, lv_color_hex(ring), 0);
-    lv_obj_set_style_shadow_opa(obj, (focused && !g_low_power) ? 55 : 0, 0);
-    lv_obj_set_style_shadow_spread(obj, (focused && !g_low_power) ? 1 : 0, 0);
+    lv_obj_set_style_shadow_opa(obj, (focused && !g_low_power) ? 90 : 0, 0);
+    lv_obj_set_style_shadow_spread(obj, (focused && !g_low_power) ? 2 : 0, 0);
 }
 
 void ui_set_card_focus(lv_obj_t *obj, bool focused, uint32_t accent)
 {
+    (void)accent;
     if (!obj) return;
-    lv_obj_set_style_border_width(obj, focused ? 3 : 1, 0);
-    lv_obj_set_style_border_color(obj, focused ? lv_color_hex(accent) : lv_color_hex(PAL.border), 0);
+    uint32_t ring = focused ? PAL.border_focus : PAL.border;
+    /* Same trick as ui_set_focus_ring: keep the 1px card border so the
+     * content box never moves, and paint the thicker focus stroke with an
+     * outline that is pulled inside the card bounds. */
+    lv_obj_set_style_border_width(obj, 1, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(ring), 0);
     lv_obj_set_style_border_opa(obj, focused ? LV_OPA_COVER : (PAL.is_light ? LV_OPA_30 : LV_OPA_40), 0);
-    lv_obj_set_style_shadow_width(obj, (focused && !g_low_power) ? 24 : 0, 0);
-    lv_obj_set_style_shadow_color(obj, lv_color_hex(accent), 0);
-    lv_obj_set_style_shadow_opa(obj, (focused && !g_low_power) ? 70 : 0, 0);
+    lv_obj_set_style_outline_width(obj, focused ? 5 : 0, 0);
+    lv_obj_set_style_outline_pad(obj, -5, 0);
+    lv_obj_set_style_outline_color(obj, lv_color_hex(PAL.border_focus), 0);
+    lv_obj_set_style_outline_opa(obj, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(obj, (focused && !g_low_power) ? 26 : 0, 0);
+    lv_obj_set_style_shadow_color(obj, lv_color_hex(ring), 0);
+    lv_obj_set_style_shadow_opa(obj, (focused && !g_low_power) ? 90 : 0, 0);
     lv_obj_set_style_shadow_spread(obj, (focused && !g_low_power) ? 2 : 0, 0);
+}
+
+/* Scrollbars stay hidden while a list is idle and fade back in for a moment
+ * whenever the content scrolls (touch or D-pad).  The bar is drawn just
+ * outside the object so it never covers a row's focus ring. */
+typedef struct {
+    lv_obj_t *obj;
+    lv_timer_t *timer;
+    uint32_t last_scroll;
+} ScrollbarFade;
+
+static void scrollbar_fade_delete(lv_event_t *e)
+{
+    ScrollbarFade *f = lv_event_get_user_data(e);
+    if (!f) return;
+    if (f->timer) lv_timer_del(f->timer);
+    f->timer = NULL;
+    f->obj = NULL;
+    free(f);
+}
+
+static void scrollbar_fade_tick(lv_timer_t *t)
+{
+    ScrollbarFade *f = lv_timer_get_user_data(t);
+    if (!f || !f->obj) return;
+    if (lv_tick_get() - f->last_scroll < 900) return;
+    if (lv_obj_get_style_bg_opa(f->obj, LV_PART_SCROLLBAR) != LV_OPA_TRANSP)
+        lv_obj_set_style_bg_opa(f->obj, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+}
+
+static void scrollbar_fade_scroll(lv_event_t *e)
+{
+    ScrollbarFade *f = lv_event_get_user_data(e);
+    if (!f || !f->obj) return;
+    f->last_scroll = lv_tick_get();
+    lv_obj_set_style_bg_opa(f->obj, 120, LV_PART_SCROLLBAR);
+}
+
+void ui_scrollbar_style(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_width(obj, 5, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(PAL.border_focus), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(obj, 3, LV_PART_SCROLLBAR);
+    /* Keep the track inside the list, 4px clear of the focus ring stroke
+     * (the ring is drawn on the outer 4px of each row). */
+    lv_obj_set_style_pad_right(obj, 8, LV_PART_SCROLLBAR);
+    ScrollbarFade *f = xmalloc(sizeof(*f));
+    f->obj = obj;
+    f->last_scroll = 0;
+    lv_obj_add_event_cb(obj, scrollbar_fade_scroll, LV_EVENT_SCROLL, f);
+    lv_obj_add_event_cb(obj, scrollbar_fade_delete, LV_EVENT_DELETE, f);
+    f->timer = lv_timer_create(scrollbar_fade_tick, 200, f);
+}
+
+void ui_scroll_into_view(lv_obj_t *obj, bool allow_anim)
+{
+    if (!obj) return;
+    lv_obj_t *parent = lv_obj_get_parent(obj);
+    if (!parent) return;
+    lv_area_t oa, pa;
+    lv_obj_get_coords(obj, &oa);
+    lv_obj_get_content_coords(parent, &pa);
+    if (oa.x1 >= pa.x1 && oa.x2 <= pa.x2 &&
+        oa.y1 >= pa.y1 && oa.y2 <= pa.y2)
+        return;
+    lv_obj_scroll_to_view(obj,
+        (allow_anim && !g_ui_building) ? LV_ANIM_ON : LV_ANIM_OFF);
 }
 
 void ui_init(Ui *ui)
@@ -352,6 +447,7 @@ void ui_screen_background(App *app, const char *cover_path, uint32_t accent)
     if (!app->config.low_power && cover_path && *cover_path && file_exists(cover_path)) {
         char *src = ui_img_src(cover_path);
         lv_obj_t *img = lv_image_create(root);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_pos(img, 0, 0);
         lv_obj_set_size(img, ui_scale_x(L->w), ui_scale_y(L->h));
@@ -488,6 +584,37 @@ static void status_item_clicked(lv_event_t *e)
     app_open_control_center_view(ctx->app, ctx->kind);
 }
 
+/* The individual status items are narrow. If a touch lands in the padding
+ * between them, route it to the nearest item instead of swallowing the tap. */
+static void status_pill_clicked(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app || app->ui.status_item_count <= 0) return;
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    int best = 0;
+    int best_dist = 0x7fffffff;
+    for (int i = 0; i < app->ui.status_item_count; i++) {
+        lv_obj_t *item = app->ui.status_items[i];
+        if (!item) continue;
+        lv_area_t a;
+        lv_obj_get_coords(item, &a);
+        int dx = p.x - (a.x1 + a.x2) / 2;
+        int dy = p.y - (a.y1 + a.y2) / 2;
+        int dist = dx * dx + dy * dy;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = i;
+        }
+    }
+    app->status_on_bar = false;
+    ui_update_status_focus(app);
+    app_open_control_center_view(app, app->ui.status_kinds[best]);
+}
+
 static void status_ctx_free(lv_event_t *e)
 {
     free(lv_event_get_user_data(e));
@@ -557,8 +684,11 @@ void ui_topbar(App *app)
     int padv = ui_vx(pad_x);
     int gapv = ui_vx(gap);
     int bgapv = ui_vx(batt_gap);
+    int sym_wifi_v = ui_vx(sym_wifi);
+    int sym_bt_v = ui_vx(sym_bt);
     int sym_batt_v = ui_vx(sym_batt);
     int sym_vol_v = ui_vx(sym_vol);
+    int pct_wv = ui_vx(pct_w);
     int wifi_w = ui_vx(sym_wifi + bt_gap + sym_bt + pad_x * 2);
     int battery_w = ui_vx(pad_x + sym_batt + batt_gap + pct_w + pad_x);
     int volume_w = ui_vx(pad_x + sym_vol +
@@ -595,6 +725,8 @@ void ui_topbar(App *app)
     lv_obj_set_style_shadow_color(status, lv_color_hex(PAL.accent), 0);
     lv_obj_set_style_shadow_opa(status, 28, 0);
     lv_obj_set_style_shadow_spread(status, 1, 0);
+    lv_obj_add_flag(status, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(status, status_pill_clicked, LV_EVENT_CLICKED, app);
 
     int stx = ui_vx(edge);
     int text_h = ui_vy(lv_font_get_line_height(status_font));
@@ -608,10 +740,10 @@ void ui_topbar(App *app)
     lv_obj_set_ext_click_area(wifi, touch_ext);
     g_wifi_label = ui_label(wifi, LV_SYMBOL_WIFI, status_font, PAL.text3,
                             padv, (sh2 - text_h) / 2,
-                            ui_vx(sym_wifi) + 2, text_h + 2);
+                            sym_wifi_v, text_h + 2);
     g_bt_label = ui_label(wifi, LV_SYMBOL_BLUETOOTH, status_font, PAL.text3,
-                          padv + ui_vx(sym_wifi) + ui_vx(bt_gap),
-                          (sh2 - text_h) / 2, ui_vx(sym_bt) + 2, text_h + 2);
+                          padv + sym_wifi_v + ui_vx(bt_gap),
+                          (sh2 - text_h) / 2, sym_bt_v, text_h + 2);
     app->ui.status_items[app->ui.status_item_count] = wifi;
     app->ui.status_kinds[app->ui.status_item_count++] = STATUS_WIFI;
     StatusClickCtx *wctx = xmalloc(sizeof(*wctx));
@@ -626,13 +758,14 @@ void ui_topbar(App *app)
     lv_obj_set_style_border_width(battery, 0, 0);
     lv_obj_add_flag(battery, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(battery, touch_ext);
-    int bi = sym_batt_v + 2;
+    int bi = sym_batt_v;
     int pct_x = padv + bi + bgapv;
     g_battery_label = ui_label(battery, LV_SYMBOL_BATTERY_FULL, status_font, PAL.text2,
                                padv, (sh2 - text_h) / 2, bi, text_h + 2);
     g_battery_percent = ui_label(battery, "--", status_font, PAL.text2,
                                  pct_x, (sh2 - text_h) / 2,
-                                 battery_w - pct_x - padv / 2, text_h + 2);
+                                 pct_wv, text_h + 2);
+    lv_obj_set_style_text_align(g_battery_percent, LV_TEXT_ALIGN_RIGHT, 0);
     app->ui.status_items[app->ui.status_item_count] = battery;
     app->ui.status_kinds[app->ui.status_item_count++] = STATUS_BATTERY;
     StatusClickCtx *bctx = xmalloc(sizeof(*bctx));
@@ -648,13 +781,14 @@ void ui_topbar(App *app)
     lv_obj_add_flag(volume, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(volume, touch_ext);
     g_volume_label = ui_label(volume, LV_SYMBOL_VOLUME_MAX, status_font, PAL.text2,
-                              padv, (sh2 - text_h) / 2, sym_vol_v + 2, text_h + 2);
+                              padv, (sh2 - text_h) / 2, sym_vol_v, text_h + 2);
     if (show_volume_pct) {
         g_volume_percent = ui_label(volume, "--", status_font, PAL.text2,
-                                    padv + sym_vol_v + 2 + bgapv,
+                                    padv + sym_vol_v + bgapv,
                                     (sh2 - text_h) / 2,
-                                    volume_w - padv - sym_vol_v - bgapv - 2,
+                                    pct_wv,
                                     text_h + 2);
+        lv_obj_set_style_text_align(g_volume_percent, LV_TEXT_ALIGN_RIGHT, 0);
     } else {
         g_volume_percent = NULL;
     }
@@ -737,6 +871,7 @@ static lv_obj_t *status_pad_icon(lv_obj_t *parent, int x, int y, int w, int h,
                                  bool connected)
 {
     lv_obj_t *img = lv_image_create(parent);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_style_all(img);
     lv_obj_set_pos(img, sxv(x), syv(y));
     lv_obj_set_size(img, sxv(w), syv(h));
@@ -748,9 +883,92 @@ static lv_obj_t *status_pad_icon(lv_obj_t *parent, int x, int y, int w, int h,
 
 /* ── Footer action pill ───────────────────────────────────────────────────── */
 
+void ui_button_hint(App *app, char *out, size_t out_size, const char *fmt)
+{
+    if (!out || out_size == 0) return;
+    const char *p = fmt ? fmt : "";
+    size_t w = 0;
+    while (*p && w + 1 < out_size) {
+        const char *label = NULL;
+        size_t token_len = 0;
+        if (strncmp(p, "{A}", 3) == 0) {
+            label = backend_button_confirm_label(&app->backend); token_len = 3;
+        } else if (strncmp(p, "{B}", 3) == 0) {
+            label = backend_button_cancel_label(&app->backend); token_len = 3;
+        } else if (strncmp(p, "{X}", 3) == 0) {
+            label = backend_button_west_label(&app->backend); token_len = 3;
+        } else if (strncmp(p, "{Y}", 3) == 0) {
+            label = backend_button_north_label(&app->backend); token_len = 3;
+        } else if (strncmp(p, "{START}", 7) == 0) {
+            label = backend_start_label(&app->backend); token_len = 7;
+        } else if (strncmp(p, "{BACK}", 6) == 0) {
+            label = backend_back_label(&app->backend); token_len = 6;
+        } else if (strncmp(p, "{GUIDE}", 7) == 0) {
+            label = backend_guide_label(&app->backend); token_len = 7;
+        } else if (strncmp(p, "{L1}", 4) == 0) {
+            label = backend_shoulder_left_label(&app->backend); token_len = 4;
+        } else if (strncmp(p, "{R1}", 4) == 0) {
+            label = backend_shoulder_right_label(&app->backend); token_len = 4;
+        } else if (strncmp(p, "{L2}", 4) == 0) {
+            label = backend_trigger_left_label(&app->backend); token_len = 4;
+        } else if (strncmp(p, "{R2}", 4) == 0) {
+            label = backend_trigger_right_label(&app->backend); token_len = 4;
+        }
+        if (label) {
+            size_t len = strlen(label);
+            if (w + len >= out_size) len = out_size - 1 - w;
+            memcpy(out + w, label, len);
+            w += len;
+            p += token_len;
+        } else {
+            out[w++] = *p++;
+        }
+    }
+    out[w] = '\0';
+}
+
+static const char *footer_button_hint(App *app, const char *src,
+                                      char *buf, size_t buf_size)
+{
+    if (!src || !*src) return src ? src : "";
+    const char *label = NULL;
+    if (src[1] == ' ' || src[1] == '\0') {
+        if (src[0] == 'A') label = backend_button_confirm_label(&app->backend);
+        else if (src[0] == 'B') label = backend_button_cancel_label(&app->backend);
+        else if (src[0] == 'X') label = backend_button_west_label(&app->backend);
+        else if (src[0] == 'Y') label = backend_button_north_label(&app->backend);
+    }
+    if (label) {
+        snprintf(buf, buf_size, "%s%s", label, src + 1);
+        return buf;
+    }
+    if (strncmp(src, "Start", 5) == 0 && (src[5] == ' ' || src[5] == '\0')) {
+        snprintf(buf, buf_size, "%s%s", backend_start_label(&app->backend), src + 5);
+        return buf;
+    }
+    if (strncmp(src, "Back", 4) == 0 && (src[4] == ' ' || src[4] == '\0')) {
+        snprintf(buf, buf_size, "%s%s", backend_back_label(&app->backend), src + 4);
+        return buf;
+    }
+    if (strncmp(src, "Select", 6) == 0 && (src[6] == ' ' || src[6] == '\0')) {
+        snprintf(buf, buf_size, "%s%s", backend_back_label(&app->backend), src + 6);
+        return buf;
+    }
+    if (strncmp(src, "Guide", 5) == 0 && (src[5] == ' ' || src[5] == '\0')) {
+        snprintf(buf, buf_size, "%s%s", backend_guide_label(&app->backend), src + 5);
+        return buf;
+    }
+    return src;
+}
+
 void ui_footer_pill(App *app, const char *title, int count,
                     const char *a, const char *b, const char *x, const char *y)
 {
+    char ba[96], bb[96], bx[96], by[96];
+    a = footer_button_hint(app, a, ba, sizeof(ba));
+    b = footer_button_hint(app, b, bb, sizeof(bb));
+    x = footer_button_hint(app, x, bx, sizeof(bx));
+    y = footer_button_hint(app, y, by, sizeof(by));
     UiLayout *L = &app->layout;
     lv_obj_t *root = app->ui.root;
     int fw = L->footer_w;
@@ -785,16 +1003,27 @@ void ui_footer_pill(App *app, const char *title, int count,
     snprintf(cbuf, sizeof(cbuf), "%d %s", count,
              app->screen == SCREEN_APPS ? "个应用" :
              app->screen == SCREEN_OVERVIEW ? "个任务" :
+             app->screen == SCREEN_FILES &&
+             app->files_panel == FILES_PANEL_CONNECT ? "台服务器" :
+             app->screen == SCREEN_FILES &&
+             app->files_panel == FILES_PANEL_MANAGE ? "项共享" :
              app->screen == SCREEN_FILES ? "个文件" :
+             app->screen == SCREEN_EDITOR ? "行" :
              app->screen == SCREEN_STORE ? "个应用" : "个游戏");
     lv_obj_t *cl = ui_label_center(chip, cbuf, FONT_XS,
                                    PAL.is_light ? PAL.accent : PAL.accent2,
                                    0, (chip_h - count_h) / 2, chip_w, count_h);
     app->ui.footer_count_label = cl;
 
-    char hints[256];
-    if (fw < 500) snprintf(hints, sizeof(hints), "%s   %s", a, b);
-    else snprintf(hints, sizeof(hints), "%s   %s   %s   %s", a, b, x, y);
+    char hints[256] = "";
+    const char *parts[4] = { a, b, x, y };
+    for (int i = 0; i < 4; i++) {
+        if (!parts[i] || !*parts[i]) continue;
+        if (fw < 500 && i >= 2) continue;
+        size_t cur = strlen(hints);
+        snprintf(hints + cur, sizeof(hints) - cur, "%s%s",
+                 cur ? "   " : "", parts[i]);
+    }
     int hint_h = ui_text_height(FONT_XS);
     int hy = (fh - hint_h) / 2;
     if (hy < 0) hy = 0;
@@ -807,8 +1036,34 @@ void ui_footer_pill(App *app, const char *title, int count,
 
 /* ── View assembly ────────────────────────────────────────────────────────── */
 
+static void ui_root_gesture(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app || app->modal != MODAL_NONE) return;
+    lv_indev_t *indev = lv_indev_active();
+    lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+    if (indev) lv_indev_wait_release(indev);
+
+    switch (app->screen) {
+        case SCREEN_HOME:
+        case SCREEN_GAMES:
+        case SCREEN_FAVORITES:
+        case SCREEN_RECENT:
+        case SCREEN_APPS:
+            /* Swipe left = next page/category, swipe right = previous.
+             * Do not rebuild the screen from inside the gesture callback:
+             * the root object is deleted by app_rebuild(). */
+            app->pending_input_action = dir == LV_DIR_LEFT ? IN_RT : IN_LT;
+            break;
+        default:
+            break;
+    }
+}
+
 void ui_build(App *app)
 {
+    g_ui_building = true;
     if (app->ui.modal) {
         app->modal = MODAL_NONE;
         app->modal_closing = false;
@@ -837,6 +1092,9 @@ void ui_build(App *app)
     lv_obj_set_pos(root, 0, 0);
     lv_obj_set_size(root, ui_scale_x(app->layout.w), ui_scale_y(app->layout.h));
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    /* Let horizontal swipes reach the root on non-scrollable pages. */
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(root, ui_root_gesture, LV_EVENT_GESTURE, app);
     app->ui.root = root;
 
     switch (app->screen) {
@@ -861,6 +1119,9 @@ void ui_build(App *app)
         case SCREEN_FILES:
             ui_build_files(app);
             break;
+        case SCREEN_EDITOR:
+            ui_build_editor(app);
+            break;
         case SCREEN_OVERVIEW:
             ui_build_overview(app);
             break;
@@ -875,7 +1136,7 @@ void ui_build(App *app)
     if (app->toast_text[0] && app->toast_until > lv_tick_get()) {
         ui_toast(app, app->toast_text);
     }
-
+    g_ui_building = false;
 }
 
 void ui_update(App *app)
@@ -970,6 +1231,10 @@ static void fade_out_done(lv_anim_t *a)
         app->ui.control_volume_bar = NULL;
         app->ui.control_volume_slider = NULL;
     }
+    app->ui.control_brightness_value = NULL;
+    app->ui.control_brightness_icon = NULL;
+    app->ui.control_brightness_bar = NULL;
+    app->ui.control_brightness_slider = NULL;
     app->control_closing = false;
     app->modal_closing = false;
     if (app->modal == ctx->modal) app->modal = MODAL_NONE;
@@ -1048,15 +1313,24 @@ void ui_update_status_focus(App *app)
         lv_obj_t *item = app->ui.status_items[i];
         if (!item) continue;
         bool focused = app->status_on_bar && i == app->status_focus;
-        /* Keep border/shadow geometry constant and only animate opacity.
-         * Toggling the ext-draw size on a floating status item made LVGL
-         * repaint a much larger area, which showed up as a whole-screen
-         * flash when moving between status items. */
-        lv_obj_set_style_bg_color(item, lv_color_hex(PAL.accent), 0);
-        lv_obj_set_style_bg_opa(item, focused ? 82 : 0, 0);
+        /* Use the same focus ring as the rest of the UI.  The ring is drawn
+         * with an outline instead of a border: a border is part of the
+         * object's content box, so the 4px stroke pushed the icon and the
+         * percentage 4px right/down and made the ring look off-centre.
+         * outline_pad = -4 keeps the stroke exactly where the old border was,
+         * inside the item bounds, without moving the children.  Geometry is
+         * constant and only opacity animates, so moving between items does
+         * not trigger a repaint flash. */
+        lv_obj_set_style_bg_opa(item, 0, 0);
         lv_obj_set_style_border_width(item, 0, 0);
-        lv_obj_set_style_shadow_width(item, 0, 0);
-        lv_obj_set_style_shadow_opa(item, 0, 0);
+        lv_obj_set_style_outline_width(item, 4, 0);
+        lv_obj_set_style_outline_pad(item, -4, 0);
+        lv_obj_set_style_outline_color(item, lv_color_hex(PAL.border_focus), 0);
+        lv_obj_set_style_outline_opa(item, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_width(item, g_low_power ? 0 : 24, 0);
+        lv_obj_set_style_shadow_color(item, lv_color_hex(PAL.border_focus), 0);
+        lv_obj_set_style_shadow_opa(item, (focused && !g_low_power) ? 90 : 0, 0);
+        lv_obj_set_style_shadow_spread(item, (focused && !g_low_power) ? 2 : 0, 0);
     }
 }
 
@@ -1071,6 +1345,7 @@ static bool nav_is_selected(App *app, int index)
     if (target == SCREEN_HOME)
         return app->screen == SCREEN_HOME || app->screen == SCREEN_GAMES ||
                app->screen == SCREEN_RECENT;
+    if (target == SCREEN_FILES && app->screen == SCREEN_EDITOR) return true;
     return app->screen == target;
 }
 
@@ -1099,19 +1374,25 @@ void ui_update_nav_focus(App *app)
         bool focused = app->nav_on_bar && i == app->nav_focus;
         lv_obj_set_style_bg_opa(item, focused ? 80 : (selected ? 48 : 120), 0);
         if (focused) {
-            uint32_t ring = ui_focus_accent(i);
-            lv_obj_set_style_border_width(item, 2, 0);
+            uint32_t ring = PAL.border_focus;
+            lv_obj_set_style_border_width(item, 1, 0);
             lv_obj_set_style_border_color(item, lv_color_hex(ring), 0);
             lv_obj_set_style_border_opa(item, 255, 0);
-            lv_obj_set_style_shadow_width(item, g_low_power ? 0 : 12, 0);
+            lv_obj_set_style_outline_width(item, 4, 0);
+            lv_obj_set_style_outline_pad(item, -4, 0);
+            lv_obj_set_style_outline_color(item, lv_color_hex(ring), 0);
+            lv_obj_set_style_outline_opa(item, 255, 0);
+            lv_obj_set_style_shadow_width(item, g_low_power ? 0 : 20, 0);
             lv_obj_set_style_shadow_color(item, lv_color_hex(ring), 0);
-            lv_obj_set_style_shadow_opa(item, g_low_power ? 0 : 48, 0);
-            lv_obj_set_style_shadow_spread(item, 1, 0);
+            lv_obj_set_style_shadow_opa(item, g_low_power ? 0 : 80, 0);
+            lv_obj_set_style_shadow_spread(item, g_low_power ? 0 : 2, 0);
         } else {
             lv_obj_set_style_border_width(item, 1, 0);
             lv_obj_set_style_border_color(item,
                 lv_color_hex(selected ? PAL.border_focus : PAL.border), 0);
             lv_obj_set_style_border_opa(item, selected ? 150 : 90, 0);
+            lv_obj_set_style_outline_width(item, 0, 0);
+            lv_obj_set_style_outline_opa(item, LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_width(item, 0, 0);
         }
     }
@@ -1206,6 +1487,35 @@ void ui_update_status(App *app)
 
 void ui_tick(App *app)
 {
+    if (app->pending_input_action) {
+        int action = app->pending_input_action;
+        app->pending_input_action = 0;
+        app_input(app, (InputAction)action, NULL);
+    }
+    if (app->pending_overview_focus >= 0) {
+        int focus = app->pending_overview_focus;
+        app->pending_overview_focus = -1;
+        if (app->screen == SCREEN_OVERVIEW) {
+            app->overview_focus = focus;
+            app_rebuild(app);
+        }
+    }
+    if (app->pending_overview_activate >= 0) {
+        int index = app->pending_overview_activate;
+        app->pending_overview_activate = -1;
+        if (app->screen == SCREEN_OVERVIEW)
+            app_activate_task(app, index);
+    }
+    if (app->pending_overview_close) {
+        app->pending_overview_close = false;
+        if (app->screen == SCREEN_OVERVIEW)
+            app_close_overview(app);
+    }
+    if (app->overview_close_pending >= 0) {
+        int idx = app->overview_close_pending;
+        app->overview_close_pending = -1;
+        if (app->screen == SCREEN_OVERVIEW) app_close_task(app, idx);
+    }
     uint32_t now = lv_tick_get();
     if (g_clock_label) {
         if (now - g_last_clock > 15000) {
@@ -1254,6 +1564,29 @@ void ui_set_input_active(bool active)
 
 /* ── Modal shell ──────────────────────────────────────────────────────────── */
 
+static void modal_panel_stop(lv_event_t *e)
+{
+    lv_event_stop_bubbling(e);
+}
+
+static void modal_overlay_clicked(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app) return;
+    switch (app->modal) {
+        case MODAL_TEXT:
+        case MODAL_SEARCH:
+        case MODAL_SCAN:
+        case MODAL_MAPPING:
+        case MODAL_CONTROL:
+            return;
+        default:
+            break;
+    }
+    audio_play(SND_BACK);
+    app_close_modal(app);
+}
+
 void ui_close_modal_visual(App *app)
 {
     if (app->ui.modal_anim_target) {
@@ -1282,6 +1615,14 @@ void ui_close_modal_visual(App *app)
     app->ui.control_volume_track_x = 0;
     app->ui.control_volume_track_w = 0;
     app->ui.control_volume_knob_size = 0;
+    app->ui.control_brightness_value = NULL;
+    app->ui.control_brightness_icon = NULL;
+    app->ui.control_brightness_bar = NULL;
+    app->ui.control_brightness_slider = NULL;
+    app->ui.control_brightness_bar_full = 0;
+    app->ui.control_brightness_track_x = 0;
+    app->ui.control_brightness_track_w = 0;
+    app->ui.control_brightness_knob_size = 0;
 }
 
 static void modal_fonts_begin(float scale);
@@ -1299,11 +1640,13 @@ static void ui_build_modal_body(App *app)
         case MODAL_ROOTS: ui_build_modal_roots(app); break;
         case MODAL_MAPPING: ui_build_modal_mapping(app); break;
         case MODAL_HELP: ui_build_modal_help(app); break;
+        case MODAL_EDITOR_HELP: ui_build_modal_editor_help(app); break;
         case MODAL_SCAN: ui_build_modal_scan(app); break;
         case MODAL_APP: ui_build_modal_app(app); break;
         case MODAL_CONTROL: ui_build_modal_control(app); break;
         case MODAL_POWER: ui_build_modal_power(app); break;
         case MODAL_GAMEPAD: ui_build_modal_gamepad(app); break;
+        case MODAL_SMB_SHARE: ui_build_modal_smb_share(app); break;
         default: break;
     }
 }
@@ -1322,6 +1665,7 @@ void ui_build_modal(App *app)
     lv_obj_set_style_bg_opa(overlay, PAL.is_light ? 110 : 170, 0);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(overlay, modal_overlay_clicked, LV_EVENT_CLICKED, app);
     app->ui.modal = overlay;
     app->ui.modal_scroll = NULL;
     lv_obj_move_foreground(overlay);
@@ -1439,6 +1783,8 @@ lv_obj_t *ui_modal_panel(struct App *app, int w, int h)
     lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_set_style_border_color(panel, lv_color_hex(PAL.border_focus), 0);
     lv_obj_set_style_border_opa(panel, 100, 0);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(panel, modal_panel_stop, LV_EVENT_CLICKED, NULL);
     lv_obj_set_style_shadow_width(panel, 40, 0);
     lv_obj_set_style_shadow_color(panel, lv_color_hex(0x000000), 0);
     lv_obj_set_style_shadow_opa(panel, 150, 0);
@@ -1494,6 +1840,7 @@ void ui_splash(App *app, const char *message)
     if (!app->config.low_power && L->w <= 1600 && file_exists(img_path)) {
         char *src = ui_img_src(img_path);
         lv_obj_t *img = lv_image_create(root);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_size(img, ui_scale_x(L->w), ui_scale_y(L->h));
         lv_image_set_src(img, src);

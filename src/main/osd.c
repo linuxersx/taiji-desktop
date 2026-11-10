@@ -69,6 +69,7 @@ static int g_screen_w = 1024;
 static int g_screen_h = 600;
 static int g_percent = 50;
 static bool g_muted = false;
+static bool g_brightness = false;
 static bool g_visible = false;
 static int64_t g_deadline = 0;
 
@@ -219,7 +220,10 @@ static void ui_update(void)
     int pct = g_percent;
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
-    if (g_muted) {
+    if (g_brightness) {
+        lv_label_set_text(g_icon, LV_SYMBOL_EYE_OPEN);
+        lv_label_set_text_fmt(g_label, "%d%%", pct);
+    } else if (g_muted) {
         lv_label_set_text(g_icon, LV_SYMBOL_MUTE);
         lv_label_set_text(g_label, tr("静音"));
     } else {
@@ -228,7 +232,7 @@ static void ui_update(void)
         lv_label_set_text_fmt(g_label, "%d%%", pct);
     }
     int fill_w = g_track_w * pct / 100;
-    if (g_muted) fill_w = 0;
+    if (g_muted && !g_brightness) fill_w = 0;
     lv_obj_set_width(g_fill, fill_w > 0 ? fill_w : 0);
     lv_obj_invalidate(g_scr);
 }
@@ -679,13 +683,23 @@ static int open_socket(void)
 static void handle_message(const char *msg)
 {
     fprintf(stderr, "[taiji-osd] message: %s\n", msg);
-    if (strncmp(msg, "show", 4) == 0) {
+    if (strncmp(msg, "showb", 5) == 0) {
+        int pct = g_percent;
+        sscanf(msg + 5, "%d", &pct);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        g_percent = pct;
+        g_brightness = true;
+        g_muted = false;
+        osd_show();
+    } else if (strncmp(msg, "show", 4) == 0) {
         int pct = g_percent;
         int muted = g_muted ? 1 : 0;
         sscanf(msg + 4, "%d %d", &pct, &muted);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
         g_percent = pct;
+        g_brightness = false;
         g_muted = muted != 0;
         osd_show();
     } else if (strncmp(msg, "hide", 4) == 0) {

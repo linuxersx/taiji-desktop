@@ -65,6 +65,54 @@ static lv_obj_t *mk_box(lv_obj_t *p, int x, int y, int w, int h, int r, uint32_t
     return o;
 }
 
+typedef struct {
+    lv_obj_t *obj;
+    lv_timer_t *timer;
+    uint32_t last;
+} ListBarFade;
+
+static void list_bar_delete(lv_event_t *e)
+{
+    ListBarFade *f = lv_event_get_user_data(e);
+    if (!f) return;
+    if (f->timer) lv_timer_del(f->timer);
+    free(f);
+}
+
+static void list_bar_tick(lv_timer_t *t)
+{
+    ListBarFade *f = lv_timer_get_user_data(t);
+    if (!f || !f->obj) return;
+    if (lv_tick_get() - f->last < 900) return;
+    if (lv_obj_get_style_bg_opa(f->obj, LV_PART_SCROLLBAR) != LV_OPA_TRANSP)
+        lv_obj_set_style_bg_opa(f->obj, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+}
+
+static void list_bar_scroll(lv_event_t *e)
+{
+    ListBarFade *f = lv_event_get_user_data(e);
+    if (!f || !f->obj) return;
+    f->last = lv_tick_get();
+    lv_obj_set_style_bg_opa(f->obj, 120, LV_PART_SCROLLBAR);
+}
+
+static void list_scrollbar(lv_obj_t *o)
+{
+    if (!o) return;
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_width(o, 5, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(o, lv_color_hex(PAL.border_focus), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(o, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(o, 8, LV_PART_SCROLLBAR);
+    ListBarFade *f = calloc(1, sizeof(*f));
+    if (!f) return;
+    f->obj = o;
+    lv_obj_add_event_cb(o, list_bar_scroll, LV_EVENT_SCROLL, f);
+    lv_obj_add_event_cb(o, list_bar_delete, LV_EVENT_DELETE, f);
+    f->timer = lv_timer_create(list_bar_tick, 200, f);
+}
+
 static lv_obj_t *mk_label(lv_obj_t *p, const char *text, lv_font_t *font,
                           uint32_t color, int x, int y, int w, int h)
 {
@@ -146,8 +194,8 @@ static void update_status(FilesApp *app)
     if (app->mode == FM_FOLDER)
         snprintf(buf, sizeof(buf), "%d 项 / 当前目录可确认", app->list.count);
     else if (app->multiple)
-        snprintf(buf, sizeof(buf), "%d 项 / 已选 %d / Start 确认", app->list.count,
-                 app->marked_count);
+        snprintf(buf, sizeof(buf), "%d 项 / 已选 %d / %s 确认", app->list.count,
+                 app->marked_count, backend_start_label(&app->backend));
     else
         snprintf(buf, sizeof(buf), "%d 项", app->list.count);
     lv_label_set_text(app->status_label, buf);
@@ -223,6 +271,7 @@ static void add_row(FilesApp *app, lv_obj_t *list, int i, int y, int list_w, int
     if (name_w < 40) name_w = 40;
 
     lv_obj_t *m = lv_image_create(r);
+        lv_obj_remove_flag(m, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_style_all(m);
     lv_obj_set_pos(m, star_x, (row_h - star_w) / 2);
     lv_obj_set_size(m, star_w, star_w);
@@ -339,7 +388,7 @@ void files_ui_build(FilesApp *app)
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    list_scrollbar(list);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     app->listbox = list;
 
@@ -359,22 +408,52 @@ void files_ui_build(FilesApp *app)
     lv_obj_set_style_bg_opa(foot, 210, 0);
     lv_obj_set_style_border_width(foot, 1, 0);
     lv_obj_set_style_border_color(foot, lv_color_hex(PAL.border), 0);
-    const char *hints;
-    if (app->mode == FM_FOLDER)
-        hints = w < 520 ? "A 进入  Start 选此目录  B 上级" :
-                          "A 进入   Start 选择此目录   B 上级   Y 菜单";
-    else if (app->mode == FM_SAVE)
-        hints = w < 520 ? "A 进入  Start 保存  B 上级" :
-                          "A 进入   Start 保存   B 上级   Y 菜单";
-    else if (app->mode == FM_OPEN && app->multiple)
-        hints = w < 520 ? "A 标记  Start 确认  B 上级" :
-                          "A 标记   X 多选   Start 确认   B 上级   Y 菜单";
-    else if (app->mode == FM_OPEN)
-        hints = w < 520 ? "A 选择  B 上级" : "A 选择   B 上级   Y 菜单";
-    else
-        hints = w < 520 ? "A 打开  B 上级  Y 菜单" :
-                          "A 打开   B 上级   X 多选   Y 菜单   Start 操作";
-    mk_label(foot, hints, FONT_XS, PAL.text2, 14, (foot_h - 16) / 2,
+    const char *btn_a = backend_button_confirm_label(&app->backend);
+    const char *btn_b = backend_button_cancel_label(&app->backend);
+    const char *btn_x = backend_button_west_label(&app->backend);
+    const char *btn_y = backend_button_north_label(&app->backend);
+    const char *btn_start = backend_start_label(&app->backend);
+    char hintbuf[192];
+    if (app->mode == FM_FOLDER) {
+        if (w < 520)
+            snprintf(hintbuf, sizeof(hintbuf), "%s 进入  %s 选此目录  %s 上级",
+                     btn_a, btn_start, btn_b);
+        else
+            snprintf(hintbuf, sizeof(hintbuf),
+                     "%s 进入   %s 选择此目录   %s 上级   %s 菜单",
+                     btn_a, btn_start, btn_b, btn_y);
+    } else if (app->mode == FM_SAVE) {
+        if (w < 520)
+            snprintf(hintbuf, sizeof(hintbuf), "%s 进入  %s 保存  %s 上级",
+                     btn_a, btn_start, btn_b);
+        else
+            snprintf(hintbuf, sizeof(hintbuf),
+                     "%s 进入   %s 保存   %s 上级   %s 菜单",
+                     btn_a, btn_start, btn_b, btn_y);
+    } else if (app->mode == FM_OPEN && app->multiple) {
+        if (w < 520)
+            snprintf(hintbuf, sizeof(hintbuf), "%s 标记  %s 确认  %s 上级",
+                     btn_a, btn_start, btn_b);
+        else
+            snprintf(hintbuf, sizeof(hintbuf),
+                     "%s 标记   %s 多选   %s 确认   %s 上级   %s 菜单",
+                     btn_a, btn_x, btn_start, btn_b, btn_y);
+    } else if (app->mode == FM_OPEN) {
+        if (w < 520)
+            snprintf(hintbuf, sizeof(hintbuf), "%s 选择  %s 上级", btn_a, btn_b);
+        else
+            snprintf(hintbuf, sizeof(hintbuf), "%s 选择   %s 上级   %s 菜单",
+                     btn_a, btn_b, btn_y);
+    } else {
+        if (w < 520)
+            snprintf(hintbuf, sizeof(hintbuf), "%s 打开  %s 上级  %s 菜单",
+                     btn_a, btn_b, btn_y);
+        else
+            snprintf(hintbuf, sizeof(hintbuf),
+                     "%s 打开   %s 上级   %s 多选   %s 菜单   %s 操作",
+                     btn_a, btn_b, btn_x, btn_y, btn_start);
+    }
+    mk_label(foot, hintbuf, FONT_XS, PAL.text2, 14, (foot_h - 16) / 2,
              w - pad * 2 - 28, 18);
     app->status_label = NULL;
     if (w >= 460) {
@@ -619,7 +698,10 @@ void files_ui_show_busy(FilesApp *app, const char *label)
     lv_obj_set_style_bg_opa(panel, 250, 0);
     mk_label_center(panel, label ? label : "正在处理...", FONT_MD, PAL.text,
                     16, 36, pw - 32, 26);
-    mk_label_center(panel, "按 B 取消", FONT_XS, PAL.text2,
+    char cancel_hint[48];
+    snprintf(cancel_hint, sizeof(cancel_hint), "按 %s 取消",
+             backend_button_cancel_label(&app->backend));
+    mk_label_center(panel, cancel_hint, FONT_XS, PAL.text2,
                     16, 92, pw - 32, 20);
     app->modal_kind = MODAL_BUSY;
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #define _GNU_SOURCE
 #include "external_osk.h"
+#include "editor.h"
 #include "ui.h"
 #include "util.h"
 #include "theme.h"
@@ -56,16 +57,10 @@ static const char *osk_bin(void)
 static void osk_runtime_path(const char *suffix, char *out, size_t n)
 {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
-    const char *sid = getenv("XDG_SESSION_ID");
     const char *wd = getenv("WAYLAND_DISPLAY");
     char safe[96] = "default";
     if (wd && *wd) {
         size_t j = 0;
-        if (sid && *sid) {
-            for (const char *p = sid; *p && j + 1 < sizeof(safe); p++)
-                safe[j++] = (*p == '/' || *p == ' ') ? '_' : *p;
-            if (j + 1 < sizeof(safe)) safe[j++] = '-';
-        }
         for (const char *p = wd; *p && j + 1 < sizeof(safe); p++)
             safe[j++] = (*p == '/' || *p == ' ') ? '_' : *p;
         safe[j] = 0;
@@ -256,6 +251,12 @@ static void append_text(char *dst, size_t n, const char *text)
     snprintf(dst + used, n - used, "%s", text);
 }
 
+static bool target_editor(App *app)
+{
+    return app->screen == SCREEN_EDITOR && app->editor.active &&
+           app->editor.editing;
+}
+
 static bool target_store(App *app)
 {
     return app->screen == SCREEN_STORE && app->store_search_edit;
@@ -280,6 +281,10 @@ static void refresh_target(App *app, bool store)
 
 static void apply_text(App *app, const char *text)
 {
+    if (target_editor(app)) {
+        editor_insert_text(app, text);
+        return;
+    }
     if (target_store(app)) {
         append_text(app->store_search, sizeof(app->store_search), text);
         refresh_target(app, true);
@@ -296,6 +301,10 @@ static void apply_text(App *app, const char *text)
 
 static void apply_clear(App *app)
 {
+    if (target_editor(app)) {
+        editor_clear_line(app);
+        return;
+    }
     if (target_store(app)) {
         app->store_search[0] = '\0';
         refresh_target(app, true);
@@ -312,6 +321,10 @@ static void apply_clear(App *app)
 
 static void apply_backspace(App *app)
 {
+    if (target_editor(app)) {
+        editor_backspace(app);
+        return;
+    }
     if (target_store(app)) {
         utf8_backspace(app->store_search);
         refresh_target(app, true);
@@ -342,7 +355,8 @@ void external_osk_poll(App *app)
     }
     /* 用户点“收起”后，如果新的输入框已经打开但 OSK 没收到 show，
      * 由主循环补发一次。visible 由 armdeck-osk 维护。 */
-    if ((target_store(app) || target_modal(app)) && !osk_visible()) {
+    if ((target_store(app) || target_modal(app) || target_editor(app)) &&
+        !osk_visible()) {
         time_t now = time(NULL);
         if (now >= g_next_show_retry) {
             g_next_show_retry = now + 1;
@@ -357,7 +371,8 @@ void external_osk_poll(App *app)
         app->ext_osk_len = 0;
     }
     if (app->ext_osk_fd < 0) {
-        if (external_osk_available() && (target_store(app) || target_modal(app))) {
+        if (external_osk_available() &&
+            (target_store(app) || target_modal(app) || target_editor(app))) {
             time_t now = time(NULL);
             if (now >= g_next_connect) {
                 g_next_connect = now + 1;
@@ -389,8 +404,15 @@ void external_osk_poll(App *app)
             if (strncmp(line, "TEXT ", 5) == 0) { dlog("recv TEXT [%s]", line + 5); apply_text(app, line + 5); }
             else if (!strcmp(line, "BACKSPACE")) apply_backspace(app);
             else if (!strcmp(line, "CLEAR")) apply_clear(app);
-            else if (!strcmp(line, "ENTER")) app_input(app, IN_CONFIRM, NULL);
-            else if (!strcmp(line, "CANCEL")) { dlog("recv CANCEL"); app_input(app, IN_CANCEL, NULL); }
+            else if (!strcmp(line, "ENTER")) {
+                if (target_editor(app)) editor_enter(app);
+                else app_input(app, IN_CONFIRM, NULL);
+            }
+            else if (!strcmp(line, "CANCEL")) {
+                dlog("recv CANCEL");
+                if (target_editor(app)) editor_stop_edit(app);
+                else app_input(app, IN_CANCEL, NULL);
+            }
             start = nl + 1;
         }
         size_t left = strlen(start);

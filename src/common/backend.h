@@ -78,8 +78,8 @@ int backend_render_scale_percent(Backend *b);
 void backend_refresh_size(Backend *b);
 void backend_logical_to_window(Backend *b, int *x, int *y);
 void backend_text_input(bool enabled);
-void backend_configure_gamepad(bool swap_ab, bool swap_xy, bool custom,
-                               int confirm_btn, int cancel_btn,
+void backend_configure_gamepad(bool swap_ab, bool swap_xy, bool swap_ps,
+                               bool custom, int confirm_btn, int cancel_btn,
                                int menu1_btn, int menu2_btn);
 void backend_set_capture(bool enabled);
 int backend_take_captured_button(void);
@@ -91,6 +91,14 @@ const char *backend_shoulder_left_label(Backend *b);
 const char *backend_shoulder_right_label(Backend *b);
 const char *backend_trigger_left_label(Backend *b);
 const char *backend_trigger_right_label(Backend *b); /* 0..100, -1 unknown */
+const char *backend_button_confirm_label(Backend *b);
+const char *backend_button_cancel_label(Backend *b);
+const char *backend_button_west_label(Backend *b);
+const char *backend_button_north_label(Backend *b);
+const char *backend_start_label(Backend *b);
+const char *backend_back_label(Backend *b);
+const char *backend_guide_label(Backend *b);
+const char *backend_layout_name(Backend *b);
 
 #endif
 

@@ -24,6 +24,7 @@ bool catalog_is_image(const char *path);
 bool catalog_is_rom(const char *path);
 char *catalog_logo_path(const char *id);
 char *catalog_default_command(const char *id, bool mac);
+int catalog_core_candidates(const char *id, const char **out, int max);
 const char *catalog_platform_name(const char *id);
 const char *catalog_zh_name(const char *id);
 

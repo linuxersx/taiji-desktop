@@ -18,12 +18,8 @@ static void home_card_clicked(lv_event_t *e)
     HomeClickCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
     App *app = ctx->app;
-    if (app->home_focus != ctx->index) {
-        app->home_focus = ctx->index;
-        ui_update_home(app);
-        audio_play(SND_NAV);
-        return;
-    }
+    /* Android-style: one tap opens the collection immediately. */
+    app->home_focus = ctx->index;
     Collection cols[128];
     int n = app_collections(app, cols, 128);
     if (ctx->index < 0 || ctx->index >= n) return;
@@ -87,8 +83,8 @@ static void build_empty(App *app)
     lv_obj_t *key = ui_rect(btn, 12, (bh - ks) / 2, ks, ks, ks / 2, 0xFFF5F9FF);
     int key_h = ui_text_height(FONT_XS);
     int btn_text_h = ui_text_height(FONT_MD);
-    ui_label_center(key, "A", FONT_XS, PAL.accent, 0, (ks - key_h) / 2,
-                    ks, key_h);
+    ui_label_center(key, backend_button_confirm_label(&app->backend),
+                    FONT_XS, PAL.accent, 0, (ks - key_h) / 2, ks, key_h);
     ui_label_center(btn, "添加游戏目录", FONT_MD, 0xFFFFFFFF,
                     ks + 18, (bh - btn_text_h) / 2, bw - ks - 30,
                     btn_text_h);
@@ -99,7 +95,9 @@ static void build_empty(App *app)
     lv_obj_set_style_shadow_spread(btn, 1, 0);
     lv_obj_add_event_cb(btn, add_root_clicked, LV_EVENT_CLICKED, app);
     if (show_hint) {
-        ui_label_center(panel, "按 Y 打开工具菜单", FONT_XS, PAL.text3,
+        char hint[64];
+        ui_button_hint(app, hint, sizeof(hint), "按 {Y} 打开工具菜单");
+        ui_label_center(panel, hint, FONT_XS, PAL.text3,
                         20, ph - ui_text_height(FONT_XS) - 8, pw - 40,
                         ui_text_height(FONT_XS));
     }

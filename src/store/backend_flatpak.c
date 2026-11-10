@@ -63,6 +63,91 @@ static char *run_capture(const char *cmd)
     return buf;
 }
 
+static bool contains_icase(const char *text, const char *needle)
+{
+    return text && needle && *needle && strcasestr(text, needle) != NULL;
+}
+
+static bool flatpak_network_error(const char *text)
+{
+    return contains_icase(text, "Could not resolve hostname") ||
+           contains_icase(text, "Temporary failure in name resolution") ||
+           contains_icase(text, "Name or service not known") ||
+           contains_icase(text, "Network is down") ||
+           contains_icase(text, "No route to host") ||
+           contains_icase(text, "Network unreachable") ||
+           contains_icase(text, "Failed to connect") ||
+           contains_icase(text, "Could not connect") ||
+           contains_icase(text, "Connection timed out") ||
+           contains_icase(text, "Operation timed out") ||
+           contains_icase(text, "While fetching") ||
+           contains_icase(text, "Unable to load summary");
+}
+
+static void flatpak_copy_last_line(const char *text, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!text || !*text) return;
+    const char *last = NULL;
+    for (const char *p = text; *p; ) {
+        const char *nl = strchr(p, '\n');
+        if (!nl) {
+            if (*p) last = p;
+            break;
+        }
+        if (nl > p) last = p;
+        p = nl + 1;
+    }
+    if (!last) return;
+    size_t len = strcspn(last, "\r\n");
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, last, len);
+    out[len] = '\0';
+}
+
+static void flatpak_failure_message(const char *output, char *error,
+                                    size_t error_size)
+{
+    if (!error || error_size == 0) return;
+    if (flatpak_network_error(output)) {
+        snprintf(error, error_size,
+                 "网络不可用：无法连接 Flatpak 软件源，请检查 Wi-Fi、DNS 或网络设置。");
+        return;
+    }
+    if (contains_icase(output, "not authorized") ||
+        contains_icase(output, "Authentication") ||
+        contains_icase(output, "polkit") ||
+        contains_icase(output, "No authentication agent")) {
+        snprintf(error, error_size,
+                 "没有权限执行 Flatpak 操作，请检查系统授权服务（polkit）。");
+        return;
+    }
+    if (contains_icase(output, "No space left on device") ||
+        contains_icase(output, "disk full") ||
+        contains_icase(output, "not enough space")) {
+        snprintf(error, error_size,
+                 "磁盘空间不足，无法完成 Flatpak 操作。");
+        return;
+    }
+    if (contains_icase(output, "No such ref") ||
+        contains_icase(output, "not installed") ||
+        contains_icase(output, "not found") ||
+        contains_icase(output, "No remote refs")) {
+        snprintf(error, error_size,
+                 "找不到该 Flatpak 应用或软件源，请刷新商店后重试。");
+        return;
+    }
+
+    char detail[256];
+    flatpak_copy_last_line(output, detail, sizeof(detail));
+    if (detail[0])
+        snprintf(error, error_size, "Flatpak 操作失败：%.200s", detail);
+    else
+        snprintf(error, error_size,
+                 "Flatpak 操作失败，请检查网络、权限或系统日志。");
+}
+
 static long long parse_size_kb(const char *s)
 {
     double v = 0;
@@ -237,7 +322,8 @@ static bool flatpak_refresh(StoreBackend *self, StorePackageList *out,
     if (!apps || !*apps)
         apps = run_capture("flatpak remote-ls --system --app --columns=application,name,version,origin 2>&1");
     if (!apps) {
-        if (error) snprintf(error, error_size, "Flatpak 仓库为空或未配置软件源");
+        if (error) snprintf(error, error_size,
+                            "无法读取 Flatpak 软件源，请检查网络或软件源配置。");
         return false;
     }
     char err_line[256] = "";
@@ -251,8 +337,11 @@ static bool flatpak_refresh(StoreBackend *self, StorePackageList *out,
         apps = run_capture("flatpak remote-ls --system --app --columns=application,name,version,origin 2>&1");
         basic_cols = true;
         if (!apps) {
-            if (error) snprintf(error, error_size, "%s",
-                                err_line[0] ? err_line : "Flatpak 仓库读取失败");
+            if (flatpak_network_error(err_line))
+                flatpak_failure_message(err_line, error, error_size);
+            else if (error)
+                snprintf(error, error_size, "%s",
+                         err_line[0] ? err_line : "Flatpak 仓库读取失败");
             return false;
         }
         lf = strchr(apps, '\n');
@@ -302,14 +391,18 @@ static bool flatpak_refresh(StoreBackend *self, StorePackageList *out,
         find_icon(pkg.id, pkg.icon, sizeof(pkg.icon));
         store_list_push(out, &pkg);
     }
-    free(installed);
-    free(apps);
     if (out->count == 0) {
-        if (error && error_size)
-            snprintf(error, error_size, "%s",
-                     err_line[0] ? err_line : "Flatpak 仓库为空或未配置软件源");
+        if (flatpak_network_error(apps))
+            flatpak_failure_message(apps, error, error_size);
+        else if (error && error_size)
+            snprintf(error, error_size,
+                     "Flatpak 仓库为空或未配置软件源");
+        free(installed);
+        free(apps);
         return false;
     }
+    free(installed);
+    free(apps);
     if (progress && progress->progress)
         progress->progress(progress->ud, "完成", 100, NULL);
     return true;
@@ -360,6 +453,7 @@ static bool run_helper(const char *op, const char **ids, int count,
     free(argv);
 
     char line[512];
+    char errbuf[2048] = "";
     size_t used = 0;
     int status = 0;
     bool cancelled = false;
@@ -378,6 +472,16 @@ static bool run_helper(const char *op, const char **ids, int count,
             char *nl;
             while ((nl = strchr(line, '\n')) != NULL) {
                 *nl = '\0';
+                if (line[0]) {
+                    size_t cur = strlen(errbuf);
+                    size_t add = strlen(line);
+                    if (cur + add + 2 >= sizeof(errbuf)) {
+                        errbuf[0] = '\0';
+                        cur = 0;
+                    }
+                    if (cur) errbuf[cur++] = ' ';
+                    snprintf(errbuf + cur, sizeof(errbuf) - cur, "%s", line);
+                }
                 if (progress && progress->progress)
                     progress->progress(progress->ud, line, -1,
                                        line[0] ? line : NULL);
@@ -401,8 +505,7 @@ static bool run_helper(const char *op, const char **ids, int count,
         return false;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        if (error) snprintf(error, error_size, "Flatpak 操作失败（退出码 %d）",
-                            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        flatpak_failure_message(errbuf, error, error_size);
         return false;
     }
     return true;

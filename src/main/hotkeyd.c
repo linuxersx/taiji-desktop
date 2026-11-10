@@ -32,6 +32,22 @@
 #ifndef KEY_POWER
 #define KEY_POWER 116
 #endif
+#ifndef BTN_TRIGGER_HAPPY1
+#define BTN_TRIGGER_HAPPY1 0x2c0
+#endif
+#ifndef BTN_DPAD_UP
+#define BTN_DPAD_UP 0x220
+#endif
+#ifndef BTN_DPAD_DOWN
+#define BTN_DPAD_DOWN 0x221
+#endif
+#ifndef ABS_HAT0Y
+#define ABS_HAT0Y 0x11
+#endif
+#ifndef KEY_RECORD
+#define KEY_RECORD 0x1a7
+#endif
+#define BRIGHTNESS_STEP 10
 #define POWER_LONG_MS 1500
 #define GUIDE_LONG_MS 600
 #define LONG_BITS (sizeof(unsigned long) * 8)
@@ -42,6 +58,12 @@
 typedef struct {
     int fd;
     char path[64];
+    char name[128];
+    char uniq[64];
+    char phys[64];
+    bool is_pad;
+    bool is_touchpad;
+    bool has_hat;
 } Device;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -53,6 +75,10 @@ static bool g_power_long_fired = false;
 static int64_t g_guide_down_at = 0;
 static bool g_guide_long_fired = false;
 static bool g_select_down = false;
+static bool g_share_held = false;
+static bool g_share_source_grabbed = false;
+static int g_share_source_fd = -1;
+static int g_share_grab_fd = -1;
 
 static bool osk_visible(void)
 {
@@ -100,20 +126,109 @@ static bool bit_is_set(const unsigned long *bits, int code)
     return ((bits[code / LONG_BITS] >> (code % LONG_BITS)) & 1UL) != 0;
 }
 
-static bool device_has_hotkey(int fd)
+static bool device_roles(int fd, const char *name, bool *is_pad,
+                         bool *is_touchpad, bool *has_hat)
 {
     unsigned long evbit[(EV_MAX + LONG_BITS - 1) / LONG_BITS] = {0};
     unsigned long keybit[(KEY_MAX + LONG_BITS - 1) / LONG_BITS] = {0};
+    unsigned long absbit[(ABS_MAX + LONG_BITS - 1) / LONG_BITS] = {0};
     if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) < 0) return false;
     if (!bit_is_set(evbit, EV_KEY)) return false;
     if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) return false;
-    return bit_is_set(keybit, BTN_MODE) ||
-           bit_is_set(keybit, KEY_HOME) ||
-           bit_is_set(keybit, KEY_POWER);
+    (void)ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit);
+
+    bool pad = bit_is_set(keybit, BTN_MODE) ||
+               bit_is_set(keybit, KEY_HOME) ||
+               bit_is_set(keybit, KEY_POWER) ||
+               bit_is_set(keybit, BTN_TRIGGER_HAPPY1) ||
+               bit_is_set(keybit, BTN_DPAD_UP) ||
+               bit_is_set(absbit, ABS_HAT0Y);
+    bool touchpad = false;
+    if (name && (strcasestr(name, "touchpad") || strcasestr(name, "trackpad")))
+        touchpad = true;
+    else if (bit_is_set(keybit, BTN_LEFT) &&
+             bit_is_set(absbit, ABS_MT_POSITION_X))
+        touchpad = true;
+
+    *is_pad = pad;
+    *is_touchpad = touchpad;
+    *has_hat = bit_is_set(absbit, ABS_HAT0Y);
+    return pad || touchpad;
+}
+
+static void base_controller_name(const char *name, char *out, size_t out_size)
+{
+    snprintf(out, out_size, "%s", name ? name : "");
+    char *p = strcasestr(out, " touchpad");
+    if (p) *p = '\0';
+    p = strcasestr(out, " trackpad");
+    if (p) *p = '\0';
+}
+
+static bool same_controller(const Device *a, const Device *b)
+{
+    if (a->uniq[0] && b->uniq[0] && strcasecmp(a->uniq, b->uniq) == 0)
+        return true;
+
+    char na[128], nb[128];
+    base_controller_name(a->name, na, sizeof(na));
+    base_controller_name(b->name, nb, sizeof(nb));
+    if (na[0] && nb[0] && strcasecmp(na, nb) == 0) return true;
+
+    if (a->phys[0] && b->phys[0]) {
+        char pa[64], pb[64];
+        snprintf(pa, sizeof(pa), "%s", a->phys);
+        snprintf(pb, sizeof(pb), "%s", b->phys);
+        char *slash = strrchr(pa, '/');
+        if (slash) *slash = '\0';
+        slash = strrchr(pb, '/');
+        if (slash) *slash = '\0';
+        if (pa[0] && strcasecmp(pa, pb) == 0) return true;
+    }
+    return false;
+}
+
+static int find_pad_for(const Device *d)
+{
+    if (d->is_pad) return d->fd;
+    for (int i = 0; i < g_count; i++) {
+        if (g_devices[i].fd < 0 || !g_devices[i].is_pad) continue;
+        if (same_controller(d, &g_devices[i])) return g_devices[i].fd;
+    }
+    return -1;
+}
+
+static bool is_share_code(const Device *d, int code)
+{
+    if (d->is_touchpad) return code == BTN_LEFT;
+    if (code == KEY_RECORD) return true;
+    if (code != BTN_TRIGGER_HAPPY1) return false;
+    /* Some xpad versions map the d-pad to HAPPY1..HAPPY4.  Only treat HAPPY1
+     * as Share when the pad has a separate hat d-pad, or is a Switch pad. */
+    if (d->has_hat) return true;
+    return d->name[0] &&
+           (strcasestr(d->name, "switch") || strcasestr(d->name, "nintendo"));
+}
+
+static void release_share(void)
+{
+    if (!g_share_held) return;
+    if (g_share_source_grabbed && g_share_source_fd >= 0 &&
+        g_share_source_fd != g_share_grab_fd)
+        ioctl(g_share_source_fd, EVIOCGRAB, 0);
+    if (g_share_grab_fd >= 0) ioctl(g_share_grab_fd, EVIOCGRAB, 0);
+    fprintf(stderr, "[taiji-hotkeyd] share release (grab fd %d)\n",
+            g_share_grab_fd);
+    g_share_held = false;
+    g_share_source_grabbed = false;
+    g_share_source_fd = -1;
+    g_share_grab_fd = -1;
 }
 
 static void close_device(Device *d)
 {
+    if (d->fd >= 0 && (d->fd == g_share_source_fd || d->fd == g_share_grab_fd))
+        release_share();
     if (d->fd >= 0) close(d->fd);
     d->fd = -1;
 }
@@ -133,16 +248,34 @@ static void scan_devices(void)
         if (already) continue;
         int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) continue;
-        if (!device_has_hotkey(fd)) {
-            close(fd);
-            continue;
-        }
         char name[128] = "unknown";
         ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
         name[sizeof(name) - 1] = '\0';
-        fprintf(stderr, "[taiji-hotkeyd] watching %s (%s)\n", path, name);
-        g_devices[g_count].fd = fd;
-        snprintf(g_devices[g_count].path, sizeof(g_devices[g_count].path), "%s", path);
+        char uniq[64] = "";
+        char phys[64] = "";
+        ioctl(fd, EVIOCGUNIQ(sizeof(uniq) - 1), uniq);
+        uniq[sizeof(uniq) - 1] = '\0';
+        ioctl(fd, EVIOCGPHYS(sizeof(phys) - 1), phys);
+        phys[sizeof(phys) - 1] = '\0';
+        bool is_pad = false, is_touchpad = false, has_hat = false;
+        if (!device_roles(fd, name, &is_pad, &is_touchpad, &has_hat)) {
+            close(fd);
+            continue;
+        }
+        fprintf(stderr, "[taiji-hotkeyd] watching %s (%s, %s%s)\n",
+                path, name,
+                is_pad ? "pad" : "",
+                is_touchpad ? (is_pad ? "+touchpad" : "touchpad") : "");
+        Device *dev = &g_devices[g_count];
+        memset(dev, 0, sizeof(*dev));
+        dev->fd = fd;
+        snprintf(dev->path, sizeof(dev->path), "%s", path);
+        snprintf(dev->name, sizeof(dev->name), "%s", name);
+        snprintf(dev->uniq, sizeof(dev->uniq), "%s", uniq);
+        snprintf(dev->phys, sizeof(dev->phys), "%s", phys);
+        dev->is_pad = is_pad;
+        dev->is_touchpad = is_touchpad;
+        dev->has_hat = has_hat;
         g_count++;
     }
 }
@@ -195,9 +328,82 @@ static void trigger_power_request(void)
     fprintf(stderr, "[taiji-hotkeyd] power long press -> %s\n", path);
 }
 
+static void trigger_brightness_request(int delta)
+{
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    char dir[512];
+    char path[600];
+    if (runtime && *runtime) snprintf(dir, sizeof(dir), "%s/taiji", runtime);
+    else snprintf(dir, sizeof(dir), "/tmp/taiji");
+    mkdir(dir, 0700);
+    snprintf(path, sizeof(path), "%s/brightness_request", dir);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        char buf[32];
+        int n = snprintf(buf, sizeof(buf), "%d\n", delta);
+        if (n > 0) (void)write(fd, buf, (size_t)n);
+        close(fd);
+    }
+    fprintf(stderr, "[taiji-hotkeyd] capture brightness %+d%% -> %s\n", delta, path);
+}
+
 static void handle_event(const struct input_event *ev, const Device *d)
 {
+    if (ev->type == EV_ABS) {
+        if (ev->code == ABS_HAT0Y && g_share_held &&
+            d->fd == g_share_grab_fd) {
+            if (ev->value < 0) trigger_brightness_request(BRIGHTNESS_STEP);
+            else if (ev->value > 0) trigger_brightness_request(-BRIGHTNESS_STEP);
+        }
+        return;
+    }
     if (ev->type != EV_KEY) return;
+
+    /* Switch Pro Capture, Xbox Share, or PS touchpad click.  The latter may be
+     * on a separate evdev node, so grab the paired gamepad device instead. */
+    if (is_share_code(d, ev->code)) {
+        if (ev->value == 1) {
+            if (!g_share_held) {
+                int pad_fd = find_pad_for(d);
+                bool source_grabbed = false;
+                if (pad_fd >= 0 && pad_fd != d->fd)
+                    source_grabbed = ioctl(d->fd, EVIOCGRAB, 1) == 0;
+                if (pad_fd >= 0 && ioctl(pad_fd, EVIOCGRAB, 1) == 0) {
+                    g_share_held = true;
+                    g_share_source_fd = d->fd;
+                    g_share_source_grabbed = source_grabbed;
+                    g_share_grab_fd = pad_fd;
+                    fprintf(stderr,
+                            "[taiji-hotkeyd] share grab %s via %s\n",
+                            g_share_grab_fd == d->fd ? d->path : "paired pad",
+                            d->path);
+                } else {
+                    if (source_grabbed)
+                        ioctl(d->fd, EVIOCGRAB, 0);
+                    fprintf(stderr,
+                            "[taiji-hotkeyd] share grab failed %s: %s\n",
+                            d->path, pad_fd < 0 ? "no paired pad" : strerror(errno));
+                }
+            }
+        } else if (ev->value == 0 && g_share_held &&
+                   d->fd == g_share_source_fd) {
+            release_share();
+        }
+        return;
+    }
+
+    if (d->is_touchpad) return;
+
+    /* While the share key is held the paired pad is grabbed so the foreground
+     * game does not also receive the d-pad presses. */
+    if (g_share_held && d->fd == g_share_grab_fd) {
+        if (ev->code == BTN_DPAD_UP && ev->value == 1)
+            trigger_brightness_request(BRIGHTNESS_STEP);
+        else if (ev->code == BTN_DPAD_DOWN && ev->value == 1)
+            trigger_brightness_request(-BRIGHTNESS_STEP);
+        return;
+    }
+
     if (ev->code == KEY_POWER) {
         if (ev->value == 1) {
             g_power_down_at = now_ms();

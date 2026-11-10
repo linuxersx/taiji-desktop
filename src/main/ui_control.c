@@ -2,6 +2,7 @@
 #include "app.h"
 #include "i18n.h"
 #include "theme.h"
+#include "system_brightness.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -47,12 +48,12 @@ static int control_required_content_h(App *app, int cw, int base_content_h)
             very_compact = base_card_h < 190;
             compact = base_card_h < 240;
         }
-        int module_h = very_compact ? 34 : (compact ? 40 : 62);
-        int module_gap = 6;
-        int footer_h = (modules > 0 && base_card_h >= 270) ? 46 : 0;
-        int bottom_pad = footer_h > 0 ? 0 : 8;
+        int module_h = very_compact ? 30 : (compact ? 34 : 54);
+        int module_gap = very_compact ? 2 : 4;
+        int footer_h = (modules > 0 && base_card_h >= 270) ? 40 : 0;
+        int bottom_pad = footer_h > 0 ? 0 : (very_compact ? 4 : 6);
         int modules_total = modules > 0 ?
-            modules * module_h + (modules - 1) * module_gap + footer_h + 6 + bottom_pad : 0;
+            modules * module_h + (modules - 1) * module_gap + footer_h + 4 + bottom_pad : 0;
 
         char state[128];
         if (pct < 0) snprintf(state, sizeof(state), "没有检测到电池");
@@ -74,13 +75,18 @@ static int control_required_content_h(App *app, int cw, int base_content_h)
         if (text_w < 40) text_w = 40;
         lv_font_t *big_font = very_compact ? FONT_LG : (compact ? FONT_XL : FONT_XXL);
         lv_font_t *state_font = (compact || very_compact) ? FONT_XS : FONT_SM;
-        int icon_size = very_compact ? 0 : (compact ? 34 : ui_clamp(base_card_h * 20 / 100, 40, 72));
-        int h_icon = very_compact ? 0 : (compact ? 36 : icon_size + 10);
+        int icon_size = very_compact ? 0 : (compact ? 30 : ui_clamp(base_card_h * 18 / 100, 36, 64));
+        int h_icon = very_compact ? 0 : (compact ? 30 : icon_size + 6);
         int h_big = ui_text_height(big_font);
         int h_state = control_text_height(state, state_font, text_w);
         int h_health = control_text_height(hbuf, FONT_XS, text_w);
-        int gaps = h_icon > 0 ? 3 : 2;
-        need = h_icon + h_big + h_state + h_health + 2 * gaps + 8 + modules_total;
+        int gaps = (h_icon > 0 ? 1 : 0) + 2;
+        int bright_h = very_compact ? 32 : (compact ? 36 : 44);
+        /* Include the header/card gutters so the panel grows to the real
+         * content height first.  Scrolling is only needed when the screen
+         * cannot provide this height. */
+        need = h_icon + h_big + h_state + h_health + gaps + 6 +
+               modules_total + bright_h + 2 + card_y + 10;
     } else if (app->control_view == STATUS_VOLUME) {
         bool compact = base_card_h < 180;
         lv_font_t *big = compact ? FONT_XL : FONT_XXL;
@@ -116,10 +122,12 @@ static int control_required_content_h(App *app, int cw, int base_content_h)
                  backend_trigger_left_label(&app->backend),
                  backend_trigger_right_label(&app->backend));
         int text_w = cw - 16;
+        char pad_hint[64];
+        ui_button_hint(app, pad_hint, sizeof(pad_hint), "{A} 确认  {B} 返回");
         need = control_text_height(disp_name, name_font, text_w) + 4 +
                control_text_height(line, line_font, text_w) + 4 +
                control_text_height(labels, FONT_XS, text_w) + 4 +
-               control_text_height("A 确认  B 返回", FONT_XS, text_w) + 16;
+               control_text_height(pad_hint, FONT_XS, text_w) + 16;
     }
     if (need < base_card_h) need = base_card_h;
     return card_y + need + 10;
@@ -366,6 +374,56 @@ void ui_update_volume_modal(App *app)
     }
 }
 
+static void brightness_slider_drag(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app) return;
+    lv_obj_t *hit = lv_event_get_target(e);
+    lv_area_t a;
+    lv_obj_get_coords(hit, &a);
+    int knob = app->ui.control_brightness_knob_size;
+    int w = (a.x2 - a.x1) - knob;
+    if (w <= 0) return;
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    int x = p.x - a.x1 - knob / 2;
+    int val = (x * 100 + w / 2) / w;
+    if (val < 1) val = 1;
+    if (val > 100) val = 100;
+    app_brightness_set(app, val);
+}
+
+void ui_update_brightness_modal(App *app)
+{
+    if (!app) return;
+    int pct = system_brightness_get();
+    if (pct < 0) pct = 0;
+    if (app->ui.control_brightness_icon) {
+        lv_label_set_text(app->ui.control_brightness_icon, LV_SYMBOL_EYE_OPEN);
+    }
+    if (app->ui.control_brightness_value) {
+        char buf[16];
+        if (system_brightness_available())
+            snprintf(buf, sizeof(buf), "%d%%", pct);
+        else
+            snprintf(buf, sizeof(buf), "--");
+        lv_label_set_text(app->ui.control_brightness_value, buf);
+    }
+    if (app->ui.control_brightness_bar) {
+        int w = app->ui.control_brightness_bar_full * pct / 100;
+        lv_obj_set_width(app->ui.control_brightness_bar, w);
+    }
+    if (app->ui.control_brightness_slider) {
+        int span = app->ui.control_brightness_track_w -
+                   app->ui.control_brightness_knob_size;
+        if (span < 0) span = 0;
+        int x = app->ui.control_brightness_track_x + span * pct / 100;
+        lv_obj_set_x(app->ui.control_brightness_slider, x);
+    }
+}
+
 static void overlay_clicked(lv_event_t *e)
 {
     App *app = lv_event_get_user_data(e);
@@ -379,6 +437,65 @@ static void overlay_clicked(lv_event_t *e)
 static void panel_clicked(lv_event_t *e)
 {
     lv_event_stop_bubbling(e);
+}
+
+static void draw_brightness_strip(App *app, lv_obj_t *card, int y, int cw,
+                                  int h, bool compact)
+{
+    int pct = system_brightness_get();
+    if (pct < 0) pct = 0;
+    int icon_h = ui_text_height(FONT_SM);
+    int value_h = ui_text_height(FONT_XS);
+    int row_h = icon_h > value_h ? icon_h : value_h;
+    app->ui.control_brightness_icon =
+        ui_label(card, LV_SYMBOL_EYE_OPEN, FONT_SM, PAL.text2,
+                 14, y + (row_h - icon_h) / 2, 24, icon_h);
+    char pbuf[16];
+    if (system_brightness_available()) snprintf(pbuf, sizeof(pbuf), "%d%%", pct);
+    else snprintf(pbuf, sizeof(pbuf), "--");
+    app->ui.control_brightness_value =
+        ui_label(card, pbuf, FONT_XS, PAL.text3, cw - 14 - 60,
+                 y + (row_h - value_h) / 2, 60, value_h);
+    lv_obj_set_style_text_align(app->ui.control_brightness_value,
+                                LV_TEXT_ALIGN_RIGHT, 0);
+
+    int track_x = 14;
+    int track_w = cw - 28;
+    if (track_w < 40) track_w = 40;
+    int track_y = y + 20;
+    int track_h = compact ? 4 : 6;
+    int knob = compact ? 16 : 22;
+    lv_obj_t *track = ui_rect(card, track_x, track_y, track_w, track_h,
+                              track_h / 2, PAL.elevated);
+    lv_obj_set_style_bg_opa(track, 235, 0);
+    lv_obj_t *fill = ui_rect(card, track_x, track_y, track_w, track_h,
+                             track_h / 2, PAL.accent2);
+    lv_obj_t *knob_obj = ui_rect(card, track_x,
+                                 track_y + track_h / 2 - knob / 2,
+                                 knob, knob, knob / 2, 0xFFFFFF);
+    lv_obj_set_style_bg_opa(knob_obj, 255, 0);
+    lv_obj_set_style_shadow_width(knob_obj, compact ? 6 : 10, 0);
+    lv_obj_set_style_shadow_color(knob_obj, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(knob_obj, 90, 0);
+
+    app->ui.control_brightness_bar = fill;
+    app->ui.control_brightness_slider = knob_obj;
+    app->ui.control_brightness_track_x = ui_scale_x(track_x);
+    app->ui.control_brightness_track_w = ui_scale_x(track_w);
+    app->ui.control_brightness_knob_size = ui_scale_x(knob);
+    app->ui.control_brightness_bar_full = app->ui.control_brightness_track_w;
+
+    int hit_h = h - 6;
+    if (hit_h < 20) hit_h = 20;
+    int hit_y = y + (h - hit_h) / 2;
+    lv_obj_t *hit = ui_rect(card, track_x - knob / 2, hit_y,
+                            track_w + knob, hit_h, hit_h / 2, 0x000000);
+    lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(hit, brightness_slider_drag, LV_EVENT_PRESSED, app);
+    lv_obj_add_event_cb(hit, brightness_slider_drag, LV_EVENT_PRESSING, app);
+    (void)h;
+    ui_update_brightness_modal(app);
 }
 
 static const char *battery_icon(int pct)
@@ -506,6 +623,14 @@ void ui_build_modal_control(App *app)
     app->ui.control_volume_track_x = 0;
     app->ui.control_volume_track_w = 0;
     app->ui.control_volume_knob_size = 0;
+    app->ui.control_brightness_value = NULL;
+    app->ui.control_brightness_icon = NULL;
+    app->ui.control_brightness_bar = NULL;
+    app->ui.control_brightness_slider = NULL;
+    app->ui.control_brightness_bar_full = 0;
+    app->ui.control_brightness_track_x = 0;
+    app->ui.control_brightness_track_w = 0;
+    app->ui.control_brightness_knob_size = 0;
 
     if (!g_control_refresh)
         lv_obj_add_event_cb(app->ui.modal, overlay_clicked, LV_EVENT_CLICKED, app);
@@ -573,6 +698,16 @@ void ui_build_modal_control(App *app)
     if (py < L->top_y + L->top_h) py = L->top_y + L->top_h;
     if (py + ph > L->footer_y - 2) ph = L->footer_y - 2 - py;
     if (ph < 120 && avail_h >= 120) ph = 120;
+    /* The battery card has the most content (brightness + battery + CPU/GPU).
+     * Let it use the free space below the top bar instead of a fixed height;
+     * the card itself still scrolls if even that is not enough. */
+    if (app->control_view == STATUS_BATTERY) {
+        /* Use every pixel available below the top bar; scroll only if the
+         * content is still taller than this. */
+        int target = avail_h;
+        if (target < 120) target = avail_h;
+        if (ph < target) ph = target;
+    }
 
     /* 外层面板保持原始大小，不乘 cs；内部内容再按 cs 缩放。 */
     ui_set_draw_scale(1.0f);
@@ -617,6 +752,13 @@ void ui_build_modal_control(App *app)
         int card_h = content_h - card_y - 10;
         lv_obj_t *card = ui_rect(panel, inner, card_y, cw, card_h, 16, PAL.card);
         lv_obj_set_style_bg_opa(card, 90, 0);
+        if (app->control_view == STATUS_BATTERY) {
+            lv_obj_set_style_pad_all(card, 0, 0);
+            lv_obj_set_scroll_dir(card, LV_DIR_VER);
+            ui_scrollbar_style(card);
+            lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        }
         control_card_glow(app, card, false, cs);
         if (app->control_view == STATUS_BATTERY) {
             int pct = app->sys.battery;
@@ -632,17 +774,21 @@ void ui_build_modal_control(App *app)
                 very_compact = card_h < 190;
                 compact = card_h < 240;
             }
-            int module_h = very_compact ? 34 : (compact ? 40 : 62);
-            int module_gap = 6;
-            int footer_h = (modules > 0 && card_h >= 270) ? 46 : 0;
-            int bottom_pad = footer_h > 0 ? 0 : 8;
+            int module_h = very_compact ? 30 : (compact ? 34 : 54);
+            int module_gap = very_compact ? 2 : 4;
+            int bright_h = very_compact ? 32 : (compact ? 36 : 44);
+            int bright_gap = 2;
+            int body_y = bright_h + bright_gap;
+            int body_h = card_h - body_y;
+            if (body_h < 40) body_h = 40;
+            int footer_h = 0;
+            int bottom_pad = 6;
             int modules_total = modules > 0 ?
-                modules * module_h + (modules - 1) * module_gap + footer_h + 6 + bottom_pad : 0;
-            int hero_h = modules > 0 ? card_h - modules_total : card_h;
-            int min_hero = very_compact ? 56 : (compact ? 82 : 110);
-            if (hero_h < min_hero) hero_h = min_hero;
+                modules * module_h + (modules - 1) * module_gap + 6 : 0;
+            int hero_h = body_h - modules_total;
+            if (hero_h < 0) hero_h = 0;
 
-            int icon_size = very_compact ? 0 : (compact ? 34 : ui_clamp(card_h * 20 / 100, 40, 72));
+            int icon_size = very_compact ? 0 : (compact ? 30 : ui_clamp(card_h * 18 / 100, 36, 64));
             lv_font_t *icon_font = icon_size > 54 ? FONT_HERO : FONT_XXL;
             lv_font_t *big_font = very_compact ? FONT_LG : (compact ? FONT_XL : FONT_XXL);
             lv_font_t *state_font = (compact || very_compact) ? FONT_XS : FONT_SM;
@@ -667,8 +813,8 @@ void ui_build_modal_control(App *app)
 
             int text_w = cw - 24;
             if (text_w < 40) text_w = 40;
-            int h_icon = very_compact ? 0 : (compact ? 36 : icon_size + 10);
-            int h_big = very_compact ? 30 : (compact ? 36 : 46);
+            int h_icon = very_compact ? 0 : (compact ? 30 : icon_size + 6);
+            int h_big = very_compact ? 26 : (compact ? 32 : 42);
             int h_state = control_text_height(state, state_font, text_w);
             int h_health = control_text_height(hbuf, FONT_XS, text_w);
             /* 极端缩放时只保留核心信息，避免多行文字叠在卡片底部。 */
@@ -680,20 +826,16 @@ void ui_build_modal_control(App *app)
                 h_health = 0;
                 if (card_h < 46) h_state = 0;
             }
-            int gap2 = 2;
+            int gap2 = 1;
             int items = (h_icon > 0 ? 1 : 0) + 1 +
                         (h_state > 0 ? 1 : 0) + (h_health > 0 ? 1 : 0);
             int gaps = items > 1 ? items - 1 : 0;
             int stack = h_icon + h_big + h_state + h_health + gap2 * gaps;
-            /* 极矮卡片宁可隐藏性能模块，也不让主信息和模块叠在一起。 */
-            if (modules > 0 && hero_h < stack + 4) {
-                modules = 0;
-                footer_h = 0;
-                modules_total = 0;
-                hero_h = card_h;
-            }
-            int top = (hero_h - stack) / 2;
-            if (top < 2) top = 2;
+            /* The card is vertically scrollable; keep all modules and let the
+             * content extend below the viewport instead of hiding them. */
+            if (hero_h < stack + 6) hero_h = stack + 6;
+            int top = body_y + (hero_h - stack) / 2;
+            if (top < body_y + 1) top = body_y + 1;
 
             if (icon_size > 0) {
                 ui_label_center(card, pct >= 0 ? battery_icon(pct) : LV_SYMBOL_CHARGE,
@@ -720,9 +862,9 @@ void ui_build_modal_control(App *app)
             }
 
             if (modules > 0) {
-                lv_obj_t *divider = ui_rect(card, 12, hero_h, cw - 24, 1, 0, PAL.border);
+                lv_obj_t *divider = ui_rect(card, 12, body_y + hero_h, cw - 24, 1, 0, PAL.border);
                 lv_obj_set_style_bg_opa(divider, 120, 0);
-                int my = hero_h + 6;
+                int my = body_y + hero_h + 4;
                 if (has_cpu) {
                     draw_power_module(app, card, my, cw, module_h, false,
                                       compact || very_compact, very_compact);
@@ -733,17 +875,21 @@ void ui_build_modal_control(App *app)
                                       compact || very_compact, very_compact);
                 }
                 if (footer_h > 0) {
-                    const char *hint = modules > 1 ?
-                        "上下切换模块 / 左右选择 / A 应用" : "左右选择 / A 应用";
+                    char hint[96];
+                    ui_button_hint(app, hint, sizeof(hint), modules > 1 ?
+                        "上下切换模块 / 左右选择 / {A} 应用" :
+                        "左右选择 / {A} 应用");
                     ui_label(card, hint, FONT_XS, PAL.text3,
-                             14, card_h - 40, cw - 28, 16);
+                             14, body_y + body_h - 36, cw - 28, 16);
                     const char *detail = (app->power_module == 1 && has_gpu) ?
                         app->gpu.detail : app->perf.detail;
                     if (!detail || !*detail) detail = "由系统驱动管理";
                     ui_label(card, detail, FONT_XS, PAL.text3,
-                             14, card_h - 20, cw - 28, 18);
+                             14, body_y + body_h - 18, cw - 28, 18);
                 }
             }
+            draw_brightness_strip(app, card, 2, cw, bright_h,
+                                  compact || very_compact);
         } else if (app->control_view == STATUS_VOLUME) {
             int vol = app->sysvol.percent;
             bool muted = !app->sysvol.available || app->sysvol.muted || vol <= 0;
@@ -868,7 +1014,8 @@ void ui_build_modal_control(App *app)
                      backend_shoulder_right_label(&app->backend),
                      backend_trigger_left_label(&app->backend),
                      backend_trigger_right_label(&app->backend));
-            const char *hint = "A 确认  B 返回";
+            char hint[64];
+            ui_button_hint(app, hint, sizeof(hint), "{A} 确认  {B} 返回");
             int text_w = cw - 16;
             int name_h = control_text_height(disp_name, name_font, text_w);
             int line_h = control_text_height(line, line_font, text_w);
@@ -906,9 +1053,11 @@ void ui_build_modal_control(App *app)
     int right_w = cw - side_w - gap;
     if (right_w < 90) right_w = 90;
     bool compact = side_w < 150 || right_w < 260;
-    const char *hint = compact
-        ? "A 选择  X 开关  Y 扫描  B 返回"
-        : "左右 切换列表    A 展开/连接    X 开关    Y 刷新    B 返回";
+    char hintbuf[160];
+    ui_button_hint(app, hintbuf, sizeof(hintbuf), compact
+        ? "{A} 选择  {X} 开关  {Y} 扫描  {B} 返回"
+        : "左右 切换列表    {A} 展开/连接    {X} 开关    {Y} 刷新    {B} 返回");
+    const char *hint = hintbuf;
     int bottom_h = control_text_height(hint, FONT_XS, cw - 8) + 4;
     int area_bottom = content_h - bottom_h - 8;
     if (area_bottom < y + 40) area_bottom = y + 40;
@@ -939,7 +1088,10 @@ void ui_build_modal_control(App *app)
     lv_obj_set_style_border_opa(refresh, 90, 0);
     lv_obj_add_flag(refresh, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(refresh, refresh_clicked, LV_EVENT_CLICKED, app);
-    ui_label_center(refresh, "Y 刷新", FONT_XS, PAL.text2,
+    char refresh_label[32];
+    snprintf(refresh_label, sizeof(refresh_label), "%s 刷新",
+             backend_button_north_label(&app->backend));
+    ui_label_center(refresh, refresh_label, FONT_XS, PAL.text2,
                     0, 1, 64, section_h);
 
     if (!app->control_expanded) {
@@ -959,7 +1111,7 @@ void ui_build_modal_control(App *app)
         lv_obj_set_style_pad_all(list, 0, 0);
         lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
         lv_obj_set_scroll_dir(list, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+        ui_scrollbar_style(list);
         lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
 
         if (count == 0) {
@@ -970,16 +1122,18 @@ void ui_build_modal_control(App *app)
                 else if (!app->bt.enabled)
                     empty = "蓝牙已关闭";
                 else
-                    empty = "未发现设备，按 Y 重新扫描";
+                    empty = "未发现设备，按 {Y} 重新扫描";
             } else {
                 empty = app->wifi.available
                     ? (app->wifi.message[0] ? app->wifi.message :
-                       "未发现网络，按 Y 重新扫描")
+                       "未发现网络，按 {Y} 重新扫描")
                     : "NetworkManager 不可用";
             }
-            int empty_h = control_text_height(empty, FONT_XS, right_w - 8);
+            char emptybuf[192];
+            ui_button_hint(app, emptybuf, sizeof(emptybuf), empty);
+            int empty_h = control_text_height(emptybuf, FONT_XS, right_w - 8);
             if (empty_h < 22) empty_h = 22;
-            ui_label(list, empty, FONT_XS, PAL.text3, 2, 6, right_w - 8, empty_h);
+            ui_label(list, emptybuf, FONT_XS, PAL.text3, 2, 6, right_w - 8, empty_h);
         } else if (!bt) {
             int meta_w = compact ? 44 : 80;
             for (int i = 0; i < app->wifi.count; i++) {

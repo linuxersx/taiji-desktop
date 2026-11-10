@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #define _GNU_SOURCE
 #include "app.h"
+#include "smb_share.h"
+#include "external_osk.h"
+#include "editor.h"
 #include "theme.h"
 #include "util.h"
 #include "smb.h"
@@ -20,6 +23,9 @@
 typedef struct {
     App *app;
     int index;
+    bool pressed;
+    bool long_fired;
+    uint32_t press_ms;
 } FileRowCtx;
 
 typedef struct {
@@ -129,7 +135,10 @@ static void files_mtp_start(App *app, const char *a1, const char *a2)
 }
 
 static void files_load(App *app);
+static void files_scan_locations(App *app);
 static void files_sidebar_activate(App *app, int index);
+static void files_share_input(App *app, InputAction action);
+static void files_share_from_menu(App *app);
 static void files_up(App *app);
 static void files_enter_dir(App *app, const char *name);
 static void files_action_toggle_hidden(App *app);
@@ -146,7 +155,8 @@ bool app_files_pick_supported(App *app)
 {
     if (!app_files_available()) return false;
     return app->text_purpose == TEXT_ROOT || app->text_purpose == TEXT_APP_ICON ||
-           app->text_purpose == TEXT_EXTRACT_DIR;
+           app->text_purpose == TEXT_EXTRACT_DIR ||
+           app->text_purpose == TEXT_SMB_SHARE_PATH;
 }
 
 void app_files_pick_start(App *app)
@@ -358,21 +368,183 @@ static void files_sort_locations(App *app)
     free(tmp);
 }
 
+#define FILES_FAV_MAX 32
+static char g_files_favs[FILES_FAV_MAX][PATH_MAX];
+static int g_files_fav_count = -1;
+
+static int files_fav_index(const char *path)
+{
+    if (!path || !*path) return -1;
+    for (int i = 0; i < g_files_fav_count; i++)
+        if (strcmp(g_files_favs[i], path) == 0) return i;
+    return -1;
+}
+
+static void files_favs_save(void)
+{
+    if (g_files_fav_count < 0) return;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/files_favorites", taiji_config_dir());
+    size_t total = 0;
+    for (int i = 0; i < g_files_fav_count; i++)
+        total += strlen(g_files_favs[i]) + 1;
+    char *buf = xmalloc(total + 1);
+    char *w = buf;
+    for (int i = 0; i < g_files_fav_count; i++) {
+        size_t len = strlen(g_files_favs[i]);
+        memcpy(w, g_files_favs[i], len);
+        w += len;
+        *w++ = '\n';
+    }
+    write_file_atomic(path, buf, (size_t)(w - buf));
+    free(buf);
+}
+
+static void files_favs_seed(void)
+{
+    const char *home = fs_home();
+    static const char *dirs[] = {
+        "", "Desktop", "Downloads", "Documents", "Pictures", "Music",
+        "Videos", "ROMs",
+    };
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        char path[PATH_MAX];
+        if (!*dirs[i]) snprintf(path, sizeof(path), "%s", home);
+        else fs_join(path, sizeof(path), home, dirs[i]);
+        if (!fs_is_dir(path) || files_fav_index(path) >= 0) continue;
+        if (g_files_fav_count >= FILES_FAV_MAX) break;
+        snprintf(g_files_favs[g_files_fav_count++], PATH_MAX, "%s", path);
+    }
+    files_favs_save();
+}
+
+static void files_favs_load(void)
+{
+    if (g_files_fav_count >= 0) return;
+    g_files_fav_count = 0;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/files_favorites", taiji_config_dir());
+    if (access(path, F_OK) != 0) {
+        files_favs_seed();
+        return;
+    }
+    size_t len = 0;
+    char *data = read_file(path, &len);
+    if (!data) return;
+    char *save = NULL;
+    for (char *line = strtok_r(data, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        line = str_trim(line);
+        if (!*line || files_fav_index(line) >= 0) continue;
+        if (g_files_fav_count >= FILES_FAV_MAX) break;
+        snprintf(g_files_favs[g_files_fav_count++], PATH_MAX, "%s", line);
+    }
+    free(data);
+}
+
+bool app_files_favorite_contains(const char *path)
+{
+    files_favs_load();
+    return files_fav_index(path) >= 0;
+}
+
+bool app_files_favorite_path(App *app, char *out, size_t n)
+{
+    if (!app || !out || n == 0) return false;
+    if (app->files_on_sidebar && app->files_side_focus >= 0 &&
+        app->files_side_focus < app->files_loc_count) {
+        FileLoc *e = &app->files_locs[app->files_side_focus];
+        if (e->path[0] && fs_is_dir(e->path)) {
+            snprintf(out, n, "%s", e->path);
+            return true;
+        }
+    }
+    if (!app->files_on_sidebar && app->files_focus >= 0 &&
+        app->files_focus < app->files_list.count) {
+        FsEntry *e = &app->files_list.items[app->files_focus];
+        if (e->is_dir) {
+            fs_join(out, n, app->files_cwd, e->name);
+            return true;
+        }
+    }
+    /* A selected file still favorites the folder it lives in. */
+    if (app->files_cwd[0]) {
+        snprintf(out, n, "%s", app->files_cwd);
+        return true;
+    }
+    return false;
+}
+
+void app_files_favorite_toggle(App *app)
+{
+    char path[PATH_MAX];
+    if (!app_files_favorite_path(app, path, sizeof(path))) {
+        ui_toast(app, "没有可收藏的路径");
+        return;
+    }
+    if (!fs_is_dir(path)) {
+        ui_toast(app, "只能收藏文件夹");
+        return;
+    }
+    files_favs_load();
+    int idx = files_fav_index(path);
+    bool added;
+    if (idx >= 0) {
+        for (int i = idx; i < g_files_fav_count - 1; i++)
+            memcpy(g_files_favs[i], g_files_favs[i + 1], PATH_MAX);
+        g_files_fav_count--;
+        added = false;
+    } else if (g_files_fav_count < FILES_FAV_MAX) {
+        snprintf(g_files_favs[g_files_fav_count++], PATH_MAX, "%s", path);
+        added = true;
+    } else {
+        ui_toast(app, "收藏数量已满");
+        return;
+    }
+    files_favs_save();
+    files_scan_locations(app);
+    app->files_message[0] = '\0';
+    app_rebuild(app);
+    ui_toast(app, added ? "已加入个人收藏" : "已从个人收藏移除");
+}
+
+static void files_fav_label(const char *path, char *out, size_t out_size)
+{
+    static const struct { const char *dir; const char *label; } known[] = {
+        {"Desktop", "桌面"}, {"Downloads", "下载"}, {"Documents", "文档"},
+        {"Pictures", "图片"}, {"Music", "音乐"}, {"Videos", "影片"},
+        {"ROMs", "ROMs"},
+    };
+    const char *home = fs_home();
+    if (strcmp(path, home) == 0) {
+        snprintf(out, out_size, "主目录");
+        return;
+    }
+    const char *base = path_basename(path);
+    char parent[PATH_MAX];
+    if (fs_parent(path, parent, sizeof(parent)) && strcmp(parent, home) == 0) {
+        for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+            if (strcmp(base, known[i].dir) == 0) {
+                snprintf(out, out_size, "%s", known[i].label);
+                return;
+            }
+        }
+    }
+    snprintf(out, out_size, "%s", base);
+}
+
 static void files_scan_locations(App *app)
 {
     app->files_loc_count = 0;
     const char *home = fs_home();
-    static const struct { const char *dir; const char *label; } favs[] = {
-        {"", "主目录"}, {"Desktop", "桌面"}, {"Downloads", "下载"},
-        {"Documents", "文档"}, {"Pictures", "图片"}, {"Music", "音乐"},
-        {"Videos", "影片"}, {"ROMs", "ROMs"},
-    };
-    for (size_t i = 0; i < sizeof(favs) / sizeof(favs[0]); i++) {
-        char path[PATH_MAX];
-        if (!*favs[i].dir) snprintf(path, sizeof(path), "%s", home);
-        else fs_join(path, sizeof(path), home, favs[i].dir);
-        if (fs_is_dir(path))
-            files_loc_add(app, 0, FILE_LOC_PATH, favs[i].label, path, NULL, NULL, NULL, true, false);
+    files_favs_load();
+    for (int i = 0; i < g_files_fav_count; i++) {
+        const char *path = g_files_favs[i];
+        if (!fs_is_dir(path)) continue;
+        char label[128];
+        files_fav_label(path, label, sizeof(label));
+        files_loc_add(app, 0, FILE_LOC_PATH, label, path,
+                      NULL, NULL, NULL, true, false);
     }
     files_loc_add(app, 1, FILE_LOC_PATH, "根目录", "/", NULL, NULL, NULL, true, false);
 
@@ -428,7 +600,8 @@ static void files_scan_locations(App *app)
     for (int i = 0; i < app->share_count; i++)
         files_loc_add(app, 2, FILE_LOC_SHARE, app->shares[i].label, "",
                       NULL, app->shares[i].uri, app->shares[i].user, true, false);
-    files_loc_add(app, 2, FILE_LOC_CONNECT, "连接服务器…", "", NULL, NULL, NULL, true, false);
+    files_loc_add(app, 2, FILE_LOC_CONNECT, "连接", "", NULL, NULL, NULL, true, false);
+    files_loc_add(app, 2, FILE_LOC_MANAGE, "管理", "", NULL, NULL, NULL, true, false);
 
     if (mtp_supported())
         files_loc_add(app, 3, FILE_LOC_MTP, "MTP", "",
@@ -529,21 +702,6 @@ static bool files_mount_is_system(const char *path)
         strncmp(path, "/usr", 4) == 0)
         return true;
     return false;
-}
-
-static bool files_side_can_unmount(App *app)
-{
-    if (!app || app->files_pick != FILES_PICK_NONE) return false;
-    int i = app->files_side_focus;
-    if (i < 0 || i >= app->files_loc_count) return false;
-    FileLoc *e = &app->files_locs[i];
-    if (e->kind != FILE_LOC_DEVICE || !e->mounted || !e->removable ||
-        !e->device[0] || !e->path[0])
-        return false;
-    if (files_mount_is_system(e->path)) return false;
-    return strncmp(e->path, "/run/media/", 11) == 0 ||
-           strncmp(e->path, "/media/", 7) == 0 ||
-           strncmp(e->path, "/mnt/", 5) == 0;
 }
 
 static void files_unmount_start(App *app, int index)
@@ -896,6 +1054,12 @@ void app_files_poll(App *app)
         }
     }
 
+    if (app->smb_ui.scan_done) {
+        app->smb_ui.scan_done = false;
+        app->smb_ui.scan_running = false;
+        if (app->screen == SCREEN_FILES) app_rebuild(app);
+    }
+
     if (app->smb_running && app->smb_done) {
         app->smb_running = false;
         app->smb_done = false;
@@ -1058,6 +1222,11 @@ void app_files_text_done(App *app)
             snprintf(app->files_message, sizeof(app->files_message), "重命名失败：%s", strerror(errno));
         app_close_modal(app);
         app_files_reload(app);
+    } else if (action == 4) {
+        char path[PATH_MAX];
+        fs_join(path, sizeof(path), app->files_cwd, trimmed);
+        app_close_modal(app);
+        editor_open(app, path);
     } else if (action == 3) {
         char *expanded = expand_home(trimmed);
         if (fs_is_dir(expanded)) {
@@ -1372,12 +1541,13 @@ void app_files_open_with_begin(App *app)
         ui_toast(app, "文件夹不能选择打开方式");
         return;
     }
-    if (app->apps.count <= 0) {
+    fs_join(app->files_open_with_path, sizeof(app->files_open_with_path),
+            app->files_cwd, e->name);
+    bool builtin = editor_is_text_path(app->files_open_with_path);
+    if (app->apps.count <= 0 && !builtin) {
         ui_toast(app, "没有可用的应用");
         return;
     }
-    fs_join(app->files_open_with_path, sizeof(app->files_open_with_path),
-            app->files_cwd, e->name);
     files_mime_type(app->files_open_with_path, app->files_open_with_mime,
                     sizeof(app->files_open_with_mime));
 
@@ -1418,6 +1588,7 @@ void app_files_open_with_begin(App *app)
     }
     app->files_open_with_count = n;
     app->files_open_with_default = default_index;
+    app->files_open_with_builtin = builtin;
     app_open_choice(app, CHOICE_OPEN_WITH, "打开方式");
 }
 
@@ -1520,6 +1691,13 @@ void app_files_menu_action(App *app, MenuAction action)
         case MENU_FILE_OPEN_WITH:
             app_files_open_with_begin(app);
             break;
+        case MENU_FILE_NEW_TEXT:
+            app_open_text(app, TEXT_FILE_NAME, 4, "新建文本文件", "untitled.md",
+                          "输入文件名（.txt / .md / .html）");
+            break;
+        case MENU_FILE_SHARE:
+            files_share_from_menu(app);
+            break;
         case MENU_FILE_OPEN:
             if (app->files_focus >= 0 && app->files_focus < app->files_list.count) {
                 FsEntry *e = &app->files_list.items[app->files_focus];
@@ -1561,6 +1739,7 @@ void app_files_menu_action(App *app, MenuAction action)
             app->files_focus = 0;
             app_files_reload(app);
             break;
+        case MENU_FILE_FAVORITE: app_files_favorite_toggle(app); break;
         case MENU_FILE_PROPERTIES: files_properties(app); break;
         default: break;
     }
@@ -1631,9 +1810,9 @@ static void files_pick_activate(App *app)
     }
 }
 
-static void files_smb_prompt_saved(App *app, const FileLoc *e)
+static void files_smb_connect_uri(App *app, const char *uri, const char *user)
 {
-    const char *p = e->uri;
+    const char *p = uri;
     if (strncmp(p, "smb://", 6) == 0) p += 6;
     char host[256] = "", share[128] = "";
     const char *slash = strchr(p, '/');
@@ -1648,7 +1827,7 @@ static void files_smb_prompt_saved(App *app, const FileLoc *e)
     }
     snprintf(app->smb_host, sizeof(app->smb_host), "%s", host);
     snprintf(app->smb_share, sizeof(app->smb_share), "%s", share);
-    snprintf(app->smb_user, sizeof(app->smb_user), "%s", e->user);
+    snprintf(app->smb_user, sizeof(app->smb_user), "%s", user ? user : "");
     app->smb_pass[0] = '\0';
     if (!app->smb_user[0]) {
         files_smb_start(app);
@@ -1656,6 +1835,42 @@ static void files_smb_prompt_saved(App *app, const FileLoc *e)
         app_open_text(app, TEXT_SMB_PASS, 0, "共享密码", "",
                       "输入密码后连接共享文件夹");
     }
+}
+
+static void files_smb_prompt_saved(App *app, const FileLoc *e)
+{
+    files_smb_connect_uri(app, e->uri, e->user);
+}
+
+static void files_open_location(App *app, const char *path)
+{
+    if (!path || !*path) {
+        ui_toast(app, "路径不可用");
+        return;
+    }
+    if (fs_is_dir(path)) {
+        files_open_path(app, path);
+        return;
+    }
+    if (!fs_exists(path)) {
+        ui_toast(app, "收藏路径不存在");
+        return;
+    }
+    char parent[PATH_MAX];
+    if (!fs_parent(path, parent, sizeof(parent)))
+        snprintf(parent, sizeof(parent), "/");
+    snprintf(app->files_cwd, sizeof(app->files_cwd), "%s", parent);
+    app->files_on_sidebar = false;
+    app->files_message[0] = '\0';
+    files_load(app);
+    const char *base = path_basename(path);
+    for (int i = 0; i < app->files_list.count; i++) {
+        if (strcmp(app->files_list.items[i].name, base) == 0) {
+            app->files_focus = i;
+            break;
+        }
+    }
+    if (app->screen == SCREEN_FILES) app_rebuild(app);
 }
 
 static void files_sidebar_activate(App *app, int index)
@@ -1666,13 +1881,25 @@ static void files_sidebar_activate(App *app, int index)
     app->files_on_sidebar = false;
     if (app->layout.w < 400) app->files_sidebar_open = false;
     if (e->kind == FILE_LOC_PATH || e->kind == FILE_LOC_SHARE) {
-        if (e->kind == FILE_LOC_PATH) files_open_path(app, e->path);
+        app->files_panel = FILES_PANEL_LIST;
+        if (e->kind == FILE_LOC_PATH) files_open_location(app, e->path);
         else files_smb_prompt_saved(app, e);
     } else if (e->kind == FILE_LOC_DEVICE) {
         if (e->mounted && e->path[0]) files_open_path(app, e->path);
         else files_mount_start(app, index);
     } else if (e->kind == FILE_LOC_CONNECT) {
-        files_smb_begin(app);
+        app->files_panel = FILES_PANEL_CONNECT;
+        app->smb_ui.focus = 0;
+        app->smb_ui.view = 0;
+        app->files_on_sidebar = false;
+        app_rebuild(app);
+    } else if (e->kind == FILE_LOC_MANAGE) {
+        app->files_panel = FILES_PANEL_MANAGE;
+        app->smb_ui.focus = 0;
+        app->files_on_sidebar = false;
+        smb_local_refresh(app);
+        smb_service_query(app);
+        app_rebuild(app);
     } else if (e->kind == FILE_LOC_MTP) {
         app->files_mtp_panel = true;
         app->files_mtp_focus = 0;
@@ -1732,15 +1959,15 @@ static void input_files_sidebar(App *app, InputAction action)
         else ui_update_files(app);
         return;
     }
-    if (action == IN_X) {
-        files_scan_locations(app);
-        if (app->screen == SCREEN_FILES) app_rebuild(app);
-        return;
-    }
-    if (action == IN_Y || action == IN_START) {
+    if (action == IN_X || action == IN_START) {
         app->modal = MODAL_MENU;
         app->menu_focus = 0;
         ui_build_modal(app);
+        return;
+    }
+    if (action == IN_Y) {
+        files_scan_locations(app);
+        if (app->screen == SCREEN_FILES) app_rebuild(app);
         return;
     }
 }
@@ -1792,7 +2019,7 @@ static void input_files_pick(App *app, InputAction action)
         files_pick_activate(app);
         return;
     }
-    if (action == IN_START) {
+    if (action == IN_START || action == IN_Y) {
         if (app->files_pick == FILES_PICK_DIR) {
             files_pick_accept(app, app->files_cwd);
         } else if (app->files_focus >= 0 &&
@@ -1811,7 +2038,7 @@ static void input_files_pick(App *app, InputAction action)
         files_pick_up(app);
         return;
     }
-    if (action == IN_Y) {
+    if (action == IN_X) {
         app->modal = MODAL_MENU;
         app->menu_focus = 0;
         ui_build_modal(app);
@@ -1843,6 +2070,11 @@ void input_files(App *app, InputAction action)
             app_rebuild(app);
             audio_play(SND_NAV);
         }
+        return;
+    }
+    if (app->files_panel != FILES_PANEL_LIST) {
+        if (app->files_on_sidebar) { input_files_sidebar(app, action); return; }
+        files_share_input(app, action);
         return;
     }
     if (action == IN_LT) {
@@ -1908,7 +2140,13 @@ void input_files(App *app, InputAction action)
         ui_update_files(app);
         return;
     }
-    if (action == IN_X) {
+    if (action == IN_X || action == IN_START) {
+        app->modal = MODAL_MENU;
+        app->menu_focus = 0;
+        ui_build_modal(app);
+        return;
+    }
+    if (action == IN_Y) {
         if (app->files_list.count > 0 && app->files_marked) {
             audio_play(SND_NAV);
             app->files_marked[app->files_focus] = !app->files_marked[app->files_focus];
@@ -1925,12 +2163,6 @@ void input_files(App *app, InputAction action)
     if (action == IN_CANCEL || action == IN_B) {
         audio_play(SND_BACK);
         files_up(app);
-        return;
-    }
-    if (action == IN_Y || action == IN_START) {
-        app->modal = MODAL_MENU;
-        app->menu_focus = 0;
-        ui_build_modal(app);
         return;
     }
 }
@@ -2016,9 +2248,11 @@ static void files_tool_side_cb(lv_event_t *e)
     app_rebuild(app);
 }
 
-static int files_keycap_width(void)
+static int files_keycap_width(const char *key)
 {
-    int w = ui_unscale_x(lv_text_get_width("L2", 2, FONT_XS, 0)) + 8;
+    const char *label = (key && *key) ? key : "L2";
+    int w = ui_unscale_x(lv_text_get_width(label,
+                                           (uint32_t)strlen(label), FONT_XS, 0)) + 8;
     return ui_clamp(w, 18, 28);
 }
 
@@ -2026,7 +2260,7 @@ static lv_obj_t *files_tool_button(App *app, lv_obj_t *parent, int x, int y,
                                    const char *icon, const char *key,
                                    lv_event_cb_t cb)
 {
-    int kw = files_keycap_width();
+    int kw = files_keycap_width(key);
     int gw = key && *key ? kw + 2 + 24 : 24;
     lv_obj_t *g = lv_obj_create(parent);
     lv_obj_remove_style_all(g);
@@ -2054,24 +2288,51 @@ static lv_obj_t *files_tool_button(App *app, lv_obj_t *parent, int x, int y,
     return g;
 }
 
-static void file_row_clicked(lv_event_t *e)
+static void file_row_pressed(lv_event_t *e)
 {
-    audio_play(SND_ENTER);
     FileRowCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
+    ctx->pressed = true;
+    ctx->press_ms = lv_tick_get();
+}
+
+static void file_row_released(lv_event_t *e)
+{
+    FileRowCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx || !ctx->pressed) return;
+    ctx->pressed = false;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev && (lv_indev_get_scroll_obj(indev) ||
+                  lv_indev_get_scroll_dir(indev) != LV_DIR_NONE ||
+                  lv_indev_get_gesture_dir(indev) != LV_DIR_NONE))
+        return;
+    if (lv_tick_get() - ctx->press_ms < 450) return;
+    App *app = ctx->app;
+    ctx->long_fired = true;
+    app->files_on_sidebar = false;
+    app->files_focus = ctx->index;
+    ui_update_files(app);
+    audio_play(SND_NAV_STRONG);
+    app_input(app, IN_Y, NULL);
+}
+
+static void file_row_clicked(lv_event_t *e)
+{
+    FileRowCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    if (ctx->long_fired) {
+        ctx->long_fired = false;
+        return;
+    }
+    audio_play(SND_ENTER);
     App *app = ctx->app;
     if (app->files_on_sidebar) {
         app->files_on_sidebar = false;
         if (app->layout.w < 400) app->files_sidebar_open = false;
-        app->files_focus = ctx->index;
-        app_rebuild(app);
-        return;
     }
-    if (app->files_focus != ctx->index) {
-        app->files_focus = ctx->index;
-        ui_update_files(app);
-        return;
-    }
+    /* Android-style: one tap opens the file/folder immediately. */
+    app->files_focus = ctx->index;
+    ui_update_files(app);
     if (app->files_pick != FILES_PICK_NONE) files_pick_activate(app);
     else files_activate(app);
 }
@@ -2107,7 +2368,7 @@ static void files_build_sidebar(App *app, int x, int y, int w, int h, bool overl
     lv_obj_set_style_border_opa(panel, overlay ? 160 : 70, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
     lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
+    ui_scrollbar_style(panel);
     lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     app->ui.files_side_panel = panel;
     app->ui.files_side_row_count = app->files_loc_count;
@@ -2158,6 +2419,9 @@ static void files_build_sidebar(App *app, int x, int y, int w, int h, bool overl
         } else if (e->kind == FILE_LOC_CONNECT) {
             icon = LV_SYMBOL_PLUS;
             color = PAL.accent2;
+        } else if (e->kind == FILE_LOC_MANAGE) {
+            icon = LV_SYMBOL_SETTINGS;
+            color = PAL.text2;
         } else if (e->kind == FILE_LOC_MTP) {
             icon = LV_SYMBOL_USB;
             color = mtp_enabled() ? PAL.accent2 : PAL.text3;
@@ -2278,6 +2542,564 @@ static void files_build_mtp_panel(App *app, int x, int y, int w, int h)
     }
 }
 
+/* ── Share panel: LAN connect + local share management ───────────────────── */
+
+static void files_share_input(App *app, InputAction action);
+
+typedef struct {
+    App *app;
+    int index;
+} SharePanelCtx;
+
+static void share_panel_free(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+static void share_panel_clicked(lv_event_t *e)
+{
+    SharePanelCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    ctx->app->smb_ui.focus = ctx->index;
+    files_share_input(ctx->app, IN_CONFIRM);
+    app_rebuild(ctx->app);
+}
+
+static void share_panel_clickable(App *app, lv_obj_t *obj, int index)
+{
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    SharePanelCtx *ctx = xmalloc(sizeof(*ctx));
+    ctx->app = app;
+    ctx->index = index;
+    lv_obj_add_event_cb(obj, share_panel_clicked, LV_EVENT_CLICKED, ctx);
+    lv_obj_add_event_cb(obj, share_panel_free, LV_EVENT_DELETE, ctx);
+}
+
+static int share_manage_rows(App *app)
+{
+    return app->smb_ui.local_count + 1 + app->share_count;
+}
+
+static int share_focus_rows(App *app)
+{
+    SmbUi *ui = &app->smb_ui;
+    if (app->files_panel == FILES_PANEL_CONNECT)
+        return ui->view == 1 ? (int)ui->share_count : 2 + ui->host_count;
+    return share_manage_rows(app);
+}
+
+static void files_share_from_menu(App *app)
+{
+    SmbUi *ui = &app->smb_ui;
+    char path[PATH_MAX];
+    bool sel = app->files_focus >= 0 && app->files_focus < app->files_list.count;
+    if (sel && app->files_list.items[app->files_focus].is_dir) {
+        fs_join(path, sizeof(path), app->files_cwd,
+                app->files_list.items[app->files_focus].name);
+    } else {
+        snprintf(path, sizeof(path), "%s", app->files_cwd);
+    }
+    smb_local_refresh(app);
+    int found = -1;
+    for (int i = 0; i < ui->local_count; i++)
+        if (strcmp(ui->local[i].path, path) == 0) { found = i; break; }
+    ui->edit_index = found;
+    ui->edit_focus = 0;
+    if (found < 0) {
+        snprintf(ui->pending_path, sizeof(ui->pending_path), "%s", path);
+        ui->pending_writable = false;
+    }
+    app->modal = MODAL_SMB_SHARE;
+    ui_build_modal(app);
+}
+
+static void files_share_new(App *app)
+{
+    app->smb_ui.pending_path[0] = '\0';
+    app_open_text(app, TEXT_SMB_SHARE_PATH, 0, "共享目录", fs_home(),
+                  "输入要共享的目录，按 Y 可浏览选择");
+}
+
+void app_files_share_text_done(App *app)
+{
+    SmbUi *ui = &app->smb_ui;
+    if (app->text_purpose == TEXT_SMB_SHARE_PATH) {
+        char value[2048];
+        snprintf(value, sizeof(value), "%s", app->input_buf);
+        char *trimmed = str_trim(value);
+        char *abs = path_absolute(trimmed);
+        if (!abs || !fs_is_dir(abs)) {
+            ui_toast(app, "目录不存在");
+            free(abs);
+            return;
+        }
+        snprintf(ui->pending_path, sizeof(ui->pending_path), "%s", abs);
+        free(abs);
+        const char *base = strrchr(ui->pending_path, '/');
+        base = base ? base + 1 : ui->pending_path;
+        char name[96];
+        snprintf(name, sizeof(name), "%s", *base ? base : "share");
+        app_open_text(app, TEXT_SMB_SHARE_NAME, 0, "共享名称", name,
+                      "局域网中显示的共享名称");
+        return;
+    }
+    if (app->text_purpose == TEXT_SMB_SHARE_NAME) {
+        char value[256];
+        snprintf(value, sizeof(value), "%s", app->input_buf);
+        char *name = str_trim(value);
+        if (!*name) { ui_toast(app, "请输入共享名称"); return; }
+        char err[192] = "";
+        bool ok = smb_local_add(app, name, ui->pending_path, false, err, sizeof(err));
+        external_osk_hide(app);
+        app->modal = MODAL_NONE;
+        app->modal_closing = false;
+        ui_set_input_active(false);
+        ui_close_modal_visual(app);
+        ui->focus = share_manage_rows(app) > 0 ? ui->local_count : 0;
+        app_rebuild(app);
+        ui_toast(app, ok ? "共享已添加" : (err[0] ? err : "添加共享失败"));
+    }
+}
+
+void app_files_smb_auth_done(App *app)
+{
+    SmbUi *ui = &app->smb_ui;
+    if (app->text_purpose == TEXT_SMB_AUTH_USER) {
+        char value[256];
+        snprintf(value, sizeof(value), "%s", app->input_buf);
+        char *user = str_trim(value);
+        if (!*user) {
+            external_osk_hide(app);
+            app->modal = MODAL_NONE;
+            app->modal_closing = false;
+            ui_set_input_active(false);
+            ui_close_modal_visual(app);
+            app_rebuild(app);
+            return;
+        }
+        snprintf(ui->user, sizeof(ui->user), "%s", user);
+        app_open_text(app, TEXT_SMB_AUTH_PASS, 0, "共享密码", "",
+                      "输入密码，留空表示无密码");
+        return;
+    }
+    if (app->text_purpose == TEXT_SMB_AUTH_PASS) {
+        snprintf(ui->pass, sizeof(ui->pass), "%s", app->input_buf);
+        external_osk_hide(app);
+        app->modal = MODAL_NONE;
+        app->modal_closing = false;
+        ui_set_input_active(false);
+        ui_close_modal_visual(app);
+        app_rebuild(app);
+        if (ui->host_sel >= 0 && ui->host_sel < ui->host_count)
+            smb_fetch_shares(app, ui->hosts[ui->host_sel].addr);
+    }
+}
+
+static void files_share_open_settings(App *app, int index)
+{
+    SmbUi *ui = &app->smb_ui;
+    if (index < 0 || index >= ui->local_count) return;
+    ui->edit_index = index;
+    ui->edit_focus = 0;
+    app->modal = MODAL_SMB_SHARE;
+    ui_build_modal(app);
+}
+
+static void files_share_mount(App *app, const char *host, const char *share)
+{
+    snprintf(app->smb_host, sizeof(app->smb_host), "%s", host ? host : "");
+    snprintf(app->smb_share, sizeof(app->smb_share), "%s", share ? share : "");
+    snprintf(app->smb_user, sizeof(app->smb_user), "%s", app->smb_ui.user);
+    snprintf(app->smb_pass, sizeof(app->smb_pass), "%s", app->smb_ui.pass);
+    files_smb_start(app);
+}
+
+static void files_share_remove_bookmark(App *app, int index)
+{
+    if (index < 0 || index >= app->share_count) return;
+    for (int i = index; i + 1 < app->share_count; i++)
+        app->shares[i] = app->shares[i + 1];
+    app->share_count--;
+    files_shares_save(app);
+    files_scan_locations(app);
+    ui_toast(app, "已移除收藏");
+    app_rebuild(app);
+}
+
+static void files_share_input(App *app, InputAction action)
+{
+    SmbUi *ui = &app->smb_ui;
+    int rows = share_focus_rows(app);
+    if (rows < 1) rows = 1;
+
+    bool on_buttons = app->files_panel == FILES_PANEL_CONNECT && ui->view == 0 &&
+                      ui->focus < 2;
+    if (action == IN_LEFT) {
+        /* Only the left-most item leaves the panel; the two side-by-side
+         * buttons step left/right between each other first. */
+        if (on_buttons && ui->focus == 1) {
+            ui->focus = 0;
+            app_rebuild(app);
+            audio_play(SND_NAV);
+            return;
+        }
+        app->files_on_sidebar = true;
+        app_rebuild(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_RIGHT) {
+        if (on_buttons && ui->focus == 0) {
+            ui->focus = 1;
+            app_rebuild(app);
+            audio_play(SND_NAV);
+        }
+        return;
+    }
+    if (action == IN_UP) {
+        if (on_buttons) return;
+        if (app->files_panel == FILES_PANEL_CONNECT && ui->focus == 2) {
+            ui->focus = 1;                 /* first host -> buttons */
+            app_rebuild(app);
+            audio_play(SND_NAV);
+            return;
+        }
+        if (ui->focus > 0) ui->focus--;
+        app_rebuild(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_DOWN) {
+        if (on_buttons) {
+            if (ui->host_count > 0) {
+                ui->focus = 2;
+                app_rebuild(app);
+                audio_play(SND_NAV);
+            }
+            return;
+        }
+        if (ui->focus + 1 < rows) ui->focus++;
+        app_rebuild(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_X) {
+        if (app->files_panel == FILES_PANEL_CONNECT) {
+            if (ui->view == 1 && ui->host_sel < ui->host_count)
+                smb_fetch_shares(app, ui->hosts[ui->host_sel].addr);
+            else
+                smb_scan_start(app);
+            app_rebuild(app);
+            audio_play(SND_NAV);
+        } else {
+            char err[160] = "";
+            bool on = !ui->service_on;
+            if (smb_service_set(app, on, err, sizeof(err)))
+                ui_toast(app, on ? "共享服务已开启" : "共享服务已停止");
+            else
+                ui_toast(app, err[0] ? err : "切换共享服务失败");
+            app_rebuild(app);
+        }
+        return;
+    }
+    if (action == IN_Y) {
+        if (app->files_panel == FILES_PANEL_CONNECT) {
+            files_smb_begin(app);
+            return;
+        }
+        int local_n = ui->local_count;
+        if (ui->focus < local_n) {
+            /* delete the selected local share */
+            SmbLocalShare *sh = &ui->local[ui->focus];
+            char name[128];
+            snprintf(name, sizeof(name), "%s", sh->name);
+            char err[160] = "";
+            if (smb_local_remove(app, name, err, sizeof(err))) {
+                ui_toast(app, "共享已删除");
+                if (ui->focus >= share_manage_rows(app))
+                    ui->focus = share_manage_rows(app) > 0 ? share_manage_rows(app) - 1 : 0;
+            } else {
+                ui_toast(app, err[0] ? err : "删除共享失败");
+            }
+        } else if (ui->focus == local_n) {
+            files_share_new(app);
+            return;
+        } else {
+            files_share_remove_bookmark(app, ui->focus - local_n - 1);
+            return;
+        }
+        app_rebuild(app);
+        return;
+    }
+    if (action == IN_CONFIRM || action == IN_A) {
+        if (app->files_panel == FILES_PANEL_CONNECT) {
+            if (ui->view == 0) {
+                if (ui->focus == 0) { smb_scan_start(app); app_rebuild(app); }
+                else if (ui->focus == 1) files_smb_begin(app);
+                else {
+                    int idx = ui->focus - 2;
+                    if (idx >= 0 && idx < ui->host_count) {
+                        if (strcmp(ui->auth_host, ui->hosts[idx].addr) != 0) {
+                            ui->auth_host[0] = '\0';
+                            ui->user[0] = '\0';
+                            ui->pass[0] = '\0';
+                            snprintf(ui->auth_host, sizeof(ui->auth_host), "%s",
+                                     ui->hosts[idx].addr);
+                        }
+                        ui->host_sel = idx;
+                        ui->view = 1;
+                        ui->focus = 0;
+                        ui->share_count = 0;
+                        smb_fetch_shares(app, ui->hosts[idx].addr);
+                        app_rebuild(app);
+                    }
+                }
+            } else {
+                if (ui->share_count == 0) {
+                    app_open_text(app, TEXT_SMB_AUTH_USER, 0, "共享用户名",
+                                  ui->user, "输入这台服务器的账号，留空取消");
+                } else if (ui->focus >= 0 && ui->focus < ui->share_count) {
+                    files_share_mount(app, ui->hosts[ui->host_sel].addr,
+                                      ui->shares[ui->focus]);
+                }
+            }
+            return;
+        }
+        int local_n = ui->local_count;
+        if (ui->focus < local_n) {
+            files_share_open_settings(app, ui->focus);
+        } else if (ui->focus == local_n) {
+            files_share_new(app);
+        } else {
+            int idx = ui->focus - local_n - 1;
+            if (idx >= 0 && idx < app->share_count)
+                files_smb_connect_uri(app, app->shares[idx].uri,
+                                      app->shares[idx].user);
+        }
+        return;
+    }
+    if (action == IN_CANCEL || action == IN_B) {
+        if (app->files_panel == FILES_PANEL_CONNECT && ui->view == 1) {
+            ui->view = 0;
+            ui->focus = 2 + ui->host_sel;
+            app_rebuild(app);
+            audio_play(SND_BACK);
+            return;
+        }
+        app->files_panel = FILES_PANEL_LIST;
+        app->smb_ui.view = 0;
+        app_rebuild(app);
+        audio_play(SND_BACK);
+        return;
+    }
+}
+
+static void files_share_panel(App *app, int x, int w)
+{
+    UiLayout *L = &app->layout;
+    SmbUi *ui = &app->smb_ui;
+    int top = L->content_y;
+    int bottom = L->footer_y - 8;
+    int title_h = ui_text_height(FONT_LG);
+    int small_h = ui_text_height(FONT_XS);
+    bool connect = app->files_panel == FILES_PANEL_CONNECT;
+
+    ui_label(app->ui.root, connect ? "连接共享" : "共享管理", FONT_LG, PAL.text,
+             x, top, w, title_h);
+    char sub[256];
+    if (connect)
+        snprintf(sub, sizeof(sub), "%s", ui->scan_msg[0] ? ui->scan_msg
+                 : "扫描局域网，或手动输入服务器地址");
+    else
+        snprintf(sub, sizeof(sub), "%s", ui->service_msg[0] ? ui->service_msg
+                 : "本机共享与已连接的共享");
+    lv_obj_t *sub_label = ui_label(app->ui.root, sub, FONT_XS, PAL.text3,
+                                   x, top + title_h, w, small_h);
+    lv_label_set_long_mode(sub_label, LV_LABEL_LONG_DOT);
+
+    int body_y = top + title_h + small_h + 10;
+    if (connect && ui->view == 0) {
+        int bh = ui_clamp(L->h * 10 / 100, 36, 54);
+        int gap = 10;
+        int bw = (w - gap) / 2;
+        static const char *names[2] = { "扫描局域网", "手动输入" };
+        static const char *icons[2] = { LV_SYMBOL_REFRESH, LV_SYMBOL_EDIT };
+        int fh = ui_text_height(FONT_SM);
+        for (int i = 0; i < 2; i++) {
+            bool focus = ui->focus == i;
+            lv_obj_t *b = ui_rect(app->ui.root, x + i * (bw + gap), body_y,
+                                  bw, bh, 12, focus ? PAL.accent : PAL.card);
+            lv_obj_set_style_bg_opa(b, focus ? 60 : 45, 0);
+            if (focus) ui_set_focus_ring(b, true, PAL.accent);
+            char txt[96];
+            snprintf(txt, sizeof(txt), "%s  %s", icons[i], names[i]);
+            ui_label_center(b, txt, FONT_SM, focus ? PAL.text : PAL.text2,
+                            0, (bh - fh) / 2, bw, fh);
+            share_panel_clickable(app, b, i);
+        }
+        body_y += bh + 10;
+    }
+
+    int list_h = bottom - body_y;
+    if (list_h < 50) list_h = 50;
+    lv_obj_t *list = lv_obj_create(app->ui.root);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_pos(list, ui_scale_x(x), ui_scale_y(body_y));
+    lv_obj_set_size(list, ui_scale_x(w), ui_scale_y(list_h));
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    ui_scrollbar_style(list);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    int row_h = ui_clamp(L->h * 8 / 100, 34, 56);
+    int gap_row = 4;
+    int y = 0;
+    lv_obj_t *focus_obj = NULL;
+    int name_h = ui_text_height(FONT_SM);
+    int hint_h = ui_text_height(FONT_XS);
+
+    if (connect) {
+        if (ui->view == 1) {
+            for (int i = 0; i < ui->share_count; i++) {
+                bool focus = ui->focus == i;
+                lv_obj_t *r = ui_rect(list, 0, y, w, row_h, 8,
+                                      focus ? PAL.accent : PAL.card);
+                lv_obj_set_style_bg_opa(r, focus ? 55 : 40, 0);
+                if (focus) ui_set_focus_ring(r, true, PAL.accent);
+                ui_label(r, LV_SYMBOL_DIRECTORY, FONT_MD, PAL.accent2, 12,
+                         (row_h - name_h) / 2, 22, name_h);
+                lv_obj_t *nl = ui_label(r, ui->shares[i], FONT_SM, PAL.text,
+                                        42, (row_h - name_h) / 2,
+                                        w - 54, name_h);
+                lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+                share_panel_clickable(app, r, i);
+                if (focus) focus_obj = r;
+                y += row_h + gap_row;
+            }
+            if (ui->share_count == 0) {
+                const char *msg = ui->scan_running ? "正在读取共享..." :
+                                  (ui->auth_required ?
+                                   "需要登录才能查看共享，按 A 输入账号密码" :
+                                   "没有找到可用的共享");
+                ui_label(list, msg, FONT_SM, PAL.text3, 6, 8, w - 12, name_h);
+            }
+        } else {
+            for (int i = 0; i < ui->host_count; i++) {
+                int idx = 2 + i;
+                bool focus = ui->focus == idx;
+                lv_obj_t *r = ui_rect(list, 0, y, w, row_h, 8,
+                                      focus ? PAL.accent : PAL.card);
+                lv_obj_set_style_bg_opa(r, focus ? 55 : 40, 0);
+                if (focus) ui_set_focus_ring(r, true, PAL.accent);
+                ui_label(r, LV_SYMBOL_DRIVE, FONT_MD, PAL.accent2, 12,
+                         (row_h - name_h) / 2, 22, name_h);
+                int name_w = w * 34 / 100;
+                int addr_x = 42 + name_w + 12;
+                lv_obj_t *nl = ui_label(r, ui->hosts[i].name, FONT_SM, PAL.text,
+                                        42, (row_h - name_h) / 2,
+                                        name_w, name_h);
+                lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+                lv_obj_t *al = ui_label(r, ui->hosts[i].addr, FONT_XS, PAL.text3,
+                                        addr_x, (row_h - hint_h) / 2,
+                                        w * 70 / 100 - addr_x, hint_h);
+                lv_label_set_long_mode(al, LV_LABEL_LONG_DOT);
+                char st[48];
+                if (ui->hosts[i].share_count < 0)
+                    snprintf(st, sizeof(st), "查看共享");
+                else
+                    snprintf(st, sizeof(st), "%d 个共享", ui->hosts[i].share_count);
+                lv_obj_t *sl = ui_label(r, st, FONT_XS, PAL.text3,
+                                        w * 72 / 100, (row_h - hint_h) / 2,
+                                        w * 26 / 100, hint_h);
+                lv_obj_set_style_text_align(sl, LV_TEXT_ALIGN_RIGHT, 0);
+                share_panel_clickable(app, r, idx);
+                if (focus) focus_obj = r;
+                y += row_h + gap_row;
+            }
+            if (ui->host_count == 0)
+                ui_label(list, ui->scan_running ? "正在扫描局域网..." :
+                         "还没有发现服务器，点「扫描局域网」",
+                         FONT_SM, PAL.text3, 6, 8, w - 12, name_h);
+        }
+    } else {
+        ui_label(list, "本机共享", FONT_XS, PAL.text3, 6, 2, w - 12, hint_h);
+        y += hint_h + 4;
+        for (int i = 0; i < ui->local_count; i++) {
+            bool focus = ui->focus == i;
+            lv_obj_t *r = ui_rect(list, 0, y, w, row_h, 8,
+                                  focus ? PAL.accent : PAL.card);
+            lv_obj_set_style_bg_opa(r, focus ? 55 : 40, 0);
+            if (focus) ui_set_focus_ring(r, true, PAL.accent);
+            SmbLocalShare *sh = &ui->local[i];
+            lv_obj_t *nl = ui_label(r, sh->name, FONT_SM, PAL.text, 12,
+                                    (row_h - name_h) / 2, w * 32 / 100, name_h);
+            lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+            lv_obj_t *pl = ui_label(r, sh->path, FONT_XS, PAL.text3,
+                                    w * 34 / 100, (row_h - hint_h) / 2,
+                                    w * 42 / 100, hint_h);
+            lv_label_set_long_mode(pl, LV_LABEL_LONG_DOT);
+            lv_obj_t *al = ui_label(r, sh->writable ? "读写" : "只读",
+                                    FONT_XS, sh->writable ? PAL.warning : PAL.success,
+                                    w * 78 / 100, (row_h - hint_h) / 2,
+                                    w * 20 / 100, hint_h);
+            lv_obj_set_style_text_align(al, LV_TEXT_ALIGN_RIGHT, 0);
+            share_panel_clickable(app, r, i);
+            if (focus) focus_obj = r;
+            y += row_h + gap_row;
+        }
+        {
+            int idx = ui->local_count;
+            bool focus = ui->focus == idx;
+            lv_obj_t *r = ui_rect(list, 0, y, w, row_h, 8,
+                                  focus ? PAL.accent : PAL.card);
+            lv_obj_set_style_bg_opa(r, focus ? 55 : 40, 0);
+            if (focus) ui_set_focus_ring(r, true, PAL.accent);
+            ui_label(r, LV_SYMBOL_PLUS, FONT_MD, PAL.accent2, 12,
+                     (row_h - name_h) / 2, 22, name_h);
+            ui_label(r, "新建共享", FONT_SM, PAL.text, 42,
+                     (row_h - name_h) / 2, w - 54, name_h);
+            share_panel_clickable(app, r, idx);
+            if (focus) focus_obj = r;
+            y += row_h + gap_row + 8;
+        }
+        ui_label(list, "已连接的共享", FONT_XS, PAL.text3, 6, y, w - 12, hint_h);
+        y += hint_h + 4;
+        for (int j = 0; j < app->share_count; j++) {
+            int idx = ui->local_count + 1 + j;
+            bool focus = ui->focus == idx;
+            lv_obj_t *r = ui_rect(list, 0, y, w, row_h, 8,
+                                  focus ? PAL.accent : PAL.card);
+            lv_obj_set_style_bg_opa(r, focus ? 55 : 40, 0);
+            if (focus) ui_set_focus_ring(r, true, PAL.accent);
+            ui_label(r, LV_SYMBOL_WIFI, FONT_MD, PAL.text2, 12,
+                     (row_h - name_h) / 2, 22, name_h);
+            lv_obj_t *nl = ui_label(r, app->shares[j].label, FONT_SM, PAL.text,
+                                    42, (row_h - name_h) / 2, w * 46 / 100, name_h);
+            lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+            lv_obj_t *ul = ui_label(r, app->shares[j].uri, FONT_XS, PAL.text3,
+                                    w * 50 / 100, (row_h - hint_h) / 2,
+                                    w * 48 / 100, hint_h);
+            lv_label_set_long_mode(ul, LV_LABEL_LONG_DOT);
+            share_panel_clickable(app, r, idx);
+            if (focus) focus_obj = r;
+            y += row_h + gap_row;
+        }
+        if (app->share_count == 0)
+            ui_label(list, "还没有收藏的共享", FONT_XS, PAL.text3, 6, y,
+                     w - 12, hint_h);
+    }
+    if (focus_obj) ui_scroll_into_view(focus_obj, false);
+
+    if (connect)
+        ui_footer_pill(app, "连接共享", ui->host_count,
+                       ui->view == 1 ? "A 连接" : "A 选择", "B 返回",
+                       ui->view == 1 ? "X 刷新" : "X 扫描", "Y 手动");
+    else
+        ui_footer_pill(app, "共享管理", ui->local_count + app->share_count,
+                       "A 打开", "B 返回", "X 服务", "Y 新建/移除");
+}
+
 void ui_build_files(App *app)
 {
     if (!app->files_loaded) app_files_enter(app);
@@ -2299,10 +3121,24 @@ void ui_build_files(App *app)
     }
     if (content_w < 80) content_w = 80;
 
+    if (app->files_panel != FILES_PANEL_LIST) {
+        files_share_panel(app, content_x, content_w);
+        if (show_side) {
+            int side_x = L->rail_x;
+            int side_y = overlay ? L->content_y + 30 : L->rail_y;
+            int side_h = overlay ? L->footer_y - side_y - 4 : L->rail_h;
+            if (side_h < 60) side_h = 60;
+            files_build_sidebar(app, side_x, side_y, side_w, side_h, overlay);
+        }
+        ui_update_files(app);
+        return;
+    }
+
     int toolbar_y = L->content_y;
     int content_right = content_x + content_w;
     bool show_keys = content_w >= 310;
-    int group_w = show_keys ? files_keycap_width() + 2 + 24 : 24;
+    int group_w = show_keys ?
+        files_keycap_width(backend_trigger_left_label(&app->backend)) + 2 + 24 : 24;
     int btns = narrow ? 3 : 2;
     int btns_w = btns * group_w + (btns - 1) * 4;
     int status_w = content_w >= 460 ? 150 : 90;
@@ -2331,12 +3167,13 @@ void ui_build_files(App *app)
 
     int bx = content_right - group_w;
     app->ui.files_refresh_btn = files_tool_button(app, app->ui.root, bx, toolbar_y,
-                      LV_SYMBOL_REFRESH, show_keys ? "R2" : NULL,
+                      LV_SYMBOL_REFRESH,
+                      show_keys ? backend_trigger_right_label(&app->backend) : NULL,
                       files_tool_refresh_cb);
     bx -= group_w + 4;
     app->ui.files_eye_btn = files_tool_button(app, app->ui.root, bx, toolbar_y,
                       app->files_show_hidden ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE,
-                      show_keys ? "L2" : NULL,
+                      show_keys ? backend_trigger_left_label(&app->backend) : NULL,
                       files_tool_hidden_cb);
     if (narrow) {
         bx -= group_w + 4;
@@ -2380,7 +3217,7 @@ void ui_build_files(App *app)
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    ui_scrollbar_style(list);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
 
     app->ui.files_row_count = 0;
@@ -2421,6 +3258,7 @@ void ui_build_files(App *app)
                      cols.kind_x, (row_h - kind_h) / 2, cols.kind_w, kind_h);
         }
         lv_obj_t *star = lv_image_create(r);
+        lv_obj_remove_flag(star, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(star);
         lv_obj_set_size(star, ui_scale_x(cols.star_w - 4), ui_scale_y(cols.star_w - 4));
         lv_obj_set_pos(star, ui_scale_x(cols.star_x), ui_scale_y((row_h - cols.star_w + 4) / 2));
@@ -2433,6 +3271,11 @@ void ui_build_files(App *app)
         FileRowCtx *ctx = xmalloc(sizeof(*ctx));
         ctx->app = app;
         ctx->index = i;
+        ctx->pressed = false;
+        ctx->long_fired = false;
+        ctx->press_ms = 0;
+        lv_obj_add_event_cb(r, file_row_pressed, LV_EVENT_PRESSED, ctx);
+        lv_obj_add_event_cb(r, file_row_released, LV_EVENT_RELEASED, ctx);
         lv_obj_add_event_cb(r, file_row_clicked, LV_EVENT_CLICKED, ctx);
         lv_obj_add_event_cb(r, file_row_free, LV_EVENT_DELETE, ctx);
         app->ui.files_rows[i] = r;
@@ -2455,33 +3298,23 @@ void ui_build_files(App *app)
     if (app->files_mtp_panel) {
         files_build_mtp_panel(app, content_x, L->content_y, content_w,
                               L->footer_y - L->content_y - 4);
-        ui_footer_pill(app, "MTP", 2, "A 切换", "上下 选择", "左 侧栏", "B 返回");
+        ui_footer_pill(app, "MTP", 2, "A 切换", "B 返回", "", "");
         ui_update_files(app);
         return;
     }
 
     if (app->files_on_sidebar) {
-        bool can_unmount = files_side_can_unmount(app);
-        if (app->files_pick != FILES_PICK_NONE) {
-            ui_footer_pill(app, "文件", app->files_list.count,
-                           "A 打开/挂载", "Start 选此",
-                           can_unmount ? "Select 卸载" : "上下 位置",
-                           "B 返回");
-        } else {
-            ui_footer_pill(app, "文件", app->files_list.count,
-                           "A 打开/挂载", "上下 位置",
-                           can_unmount ? "Select 卸载" : "X 刷新",
-                           can_unmount ? "B 返回" : "Y 操作");
-        }
+        ui_footer_pill(app, "文件", app->files_list.count,
+                       "A 打开/挂载", "B 返回", "X 操作", "Y 刷新");
     } else if (app->files_pick == FILES_PICK_DIR) {
         ui_footer_pill(app, "选择目录", app->files_list.count,
-                       "A 进入", "B 上级", "Start 选此目录", "Y 操作");
+                       "A 进入", "B 上级", "X 操作", "Y 选中");
     } else if (app->files_pick == FILES_PICK_FILE) {
         ui_footer_pill(app, "选择文件", app->files_list.count,
-                       "A 选择", "B 上级", "Start 选择", "Y 操作");
+                       "A 选择", "B 上级", "X 操作", "Y 选中");
     } else {
         ui_footer_pill(app, "文件", app->files_list.count,
-                       "A 打开", "上下 移动", "左 侧栏", "Y 操作");
+                       "A 打开", "B 返回", "X 操作", "Y 选中");
     }
     ui_update_files(app);
 }
@@ -2517,9 +3350,9 @@ void ui_update_files(App *app)
         if (app->files_message[0])
             snprintf(buf, sizeof(buf), "%s", app->files_message);
         else if (app->files_pick == FILES_PICK_DIR)
-            snprintf(buf, sizeof(buf), "Start 选此目录");
+            ui_button_hint(app, buf, sizeof(buf), "{START} 选此目录");
         else if (app->files_pick == FILES_PICK_FILE)
-            snprintf(buf, sizeof(buf), "A / Start 选择");
+            ui_button_hint(app, buf, sizeof(buf), "{A} / {START} 选择");
         else if (app->files_marked_count > 0)
             snprintf(buf, sizeof(buf), "%d 项 / 已选 %d", app->files_list.count,
                      app->files_marked_count);
@@ -2533,9 +3366,9 @@ void ui_update_files(App *app)
     if (!app->files_on_sidebar &&
         app->files_focus >= 0 && app->files_focus < app->ui.files_row_count &&
         app->ui.files_rows[app->files_focus])
-        lv_obj_scroll_to_view(app->ui.files_rows[app->files_focus], LV_ANIM_ON);
+        ui_scroll_into_view(app->ui.files_rows[app->files_focus], true);
     if (app->files_side_focus >= 0 &&
         app->files_side_focus < app->ui.files_side_row_count &&
         app->ui.files_side_rows[app->files_side_focus])
-        lv_obj_scroll_to_view(app->ui.files_side_rows[app->files_side_focus], LV_ANIM_ON);
+        ui_scroll_into_view(app->ui.files_side_rows[app->files_side_focus], true);
 }

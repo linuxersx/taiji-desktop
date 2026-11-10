@@ -19,6 +19,7 @@ void config_init(Config *c)
     memset(c, 0, sizeof(*c));
     c->swap_ab = false;
     c->swap_xy = false;
+    c->swap_ps = false;
     c->custom_mapping = false;
     c->map_confirm = -1;
     c->map_cancel = -1;
@@ -123,6 +124,24 @@ void config_set_command(Config *c, const char *platform_id, const char *cmd)
     c->command_count++;
 }
 
+void config_remove_command(Config *c, const char *platform_id)
+{
+    if (!platform_id) return;
+    for (int i = 0; i < c->command_count; i++) {
+        if (!str_ieq(c->commands[i].platform_id, platform_id)) continue;
+        free(c->commands[i].platform_id);
+        free(c->commands[i].command);
+        for (int j = i; j < c->command_count - 1; j++)
+            c->commands[j] = c->commands[j + 1];
+        c->command_count--;
+        if (c->command_count == 0) {
+            free(c->commands);
+            c->commands = NULL;
+        }
+        return;
+    }
+}
+
 static void add_default_roots(Config *c)
 {
     const char *home = getenv("HOME");
@@ -172,6 +191,7 @@ void config_load(Config *c)
         else if (strcmp(key, "last_game") == 0) { free(c->last_game); c->last_game = xstrdup(val); }
         else if (strcmp(key, "swap_ab") == 0) c->swap_ab = atoi(val) != 0;
         else if (strcmp(key, "swap_xy") == 0) c->swap_xy = atoi(val) != 0;
+        else if (strcmp(key, "swap_ps") == 0) c->swap_ps = atoi(val) != 0;
         else if (strcmp(key, "custom_mapping") == 0) c->custom_mapping = atoi(val) != 0;
         else if (strcmp(key, "map_confirm") == 0) c->map_confirm = atoi(val);
         else if (strcmp(key, "map_cancel") == 0) c->map_cancel = atoi(val);
@@ -253,6 +273,7 @@ void config_save(const Config *c)
     APPEND("last_game=%s\n", c->last_game ? c->last_game : "");
     APPEND("swap_ab=%d\n", c->swap_ab ? 1 : 0);
     APPEND("swap_xy=%d\n", c->swap_xy ? 1 : 0);
+    APPEND("swap_ps=%d\n", c->swap_ps ? 1 : 0);
     APPEND("custom_mapping=%d\n", c->custom_mapping ? 1 : 0);
     APPEND("map_confirm=%d\n", c->map_confirm);
     APPEND("map_cancel=%d\n", c->map_cancel);

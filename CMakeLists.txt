@@ -62,9 +62,11 @@ add_executable(taiji
   src/files/smb.c
   src/files/star_icon.c
   src/files/ui_files.c
+  src/files/smb_share.c
   src/common/backend.c
   src/common/util.c
   src/common/catalog.c
+  src/common/libretro.c
   src/common/config.c
   src/main/desktop.c
   src/main/desktop_watch.c
@@ -72,6 +74,7 @@ add_executable(taiji
   src/main/launcher.c
   src/main/system_status.c
   src/main/system_volume.c
+  src/main/system_brightness.c
   src/main/perf.c
   src/main/gpu.c
   src/main/network.c
@@ -100,6 +103,8 @@ add_executable(taiji
   src/main/ui_keyboard.c
   src/main/ui_gamepad.c
   src/main/ui_overview.c
+  src/main/editor.c
+  src/main/ui_editor.c
 )
 
 target_include_directories(taiji PRIVATE
@@ -187,6 +192,7 @@ if(UNIX AND NOT APPLE)
     src/common/i18n.c
     src/common/config.c
     src/common/catalog.c
+    src/common/libretro.c
     src/common/util.c
   )
   target_include_directories(taiji-osd PRIVATE
@@ -216,6 +222,7 @@ if(UNIX AND NOT APPLE)
     src/common/i18n.c
     src/common/config.c
     src/common/catalog.c
+    src/common/libretro.c
     src/common/util.c
   )
   target_include_directories(taiji-files PRIVATE
@@ -246,6 +253,7 @@ if(UNIX AND NOT APPLE)
     src/common/i18n.c
     src/common/config.c
     src/common/catalog.c
+    src/common/libretro.c
     src/common/util.c
   )
   target_include_directories(taiji-store PRIVATE
@@ -260,6 +268,10 @@ if(UNIX AND NOT APPLE)
     TAIJI_VERSION="${TAIJI_VERSION}"
   )
   target_compile_options(taiji-store PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare)
+
+  add_executable(taiji-smb-helper src/files/smb_helper.c)
+  target_compile_options(taiji-smb-helper PRIVATE -Wall -Wextra)
+  install(TARGETS taiji-smb-helper RUNTIME DESTINATION libexec/taiji)
 
   add_executable(taiji-store-helper src/store/pkg_helper.c)
   target_compile_options(taiji-store-helper PRIVATE -Wall -Wextra)

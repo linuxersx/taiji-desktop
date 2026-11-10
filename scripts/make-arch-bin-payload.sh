@@ -82,6 +82,8 @@ copy_file "$ROOT/packaging/polkit/50-taiji-system.rules" \
   "$PKGROOT/usr/share/polkit-1/rules.d/50-taiji-system.rules"
 copy_file "$ROOT/packaging/polkit/50-taiji-store.rules" \
   "$PKGROOT/usr/share/polkit-1/rules.d/50-taiji-store.rules"
+copy_file "$ROOT/packaging/polkit/50-taiji-smb.rules" \
+  "$PKGROOT/usr/share/polkit-1/rules.d/50-taiji-smb.rules"
 copy_file "$ROOT/packaging/store/featured.tsv" \
   "$PKGROOT/usr/share/taiji/store/featured.tsv"
 copy_file "$ROOT/LICENSE" \
@@ -90,6 +92,8 @@ copy_file "$ROOT/THIRD_PARTY.md" \
   "$PKGROOT/usr/share/licenses/taiji/THIRD_PARTY.md"
 copy_file "$ROOT/assets/fonts/OFL.txt" \
   "$PKGROOT/usr/share/licenses/taiji/OFL.txt"
+copy_file "$ROOT/assets/fonts/LICENSE-AdwaitaSans.txt" \
+  "$PKGROOT/usr/share/licenses/taiji/LICENSE-AdwaitaSans.txt"
 copy_file "$ROOT/third_party/lvgl/LICENCE.txt" \
   "$PKGROOT/usr/share/licenses/taiji/LVGL-LICENCE.txt"
 copy_file "$ROOT/third_party/umtp-responder/LICENSE" \

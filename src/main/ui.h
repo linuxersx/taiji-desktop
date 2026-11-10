@@ -95,6 +95,14 @@ typedef struct {
     int control_volume_track_x;
     int control_volume_track_w;
     int control_volume_knob_size;
+    lv_obj_t *control_brightness_value;
+    lv_obj_t *control_brightness_icon;
+    lv_obj_t *control_brightness_bar;
+    lv_obj_t *control_brightness_slider;
+    int control_brightness_bar_full;
+    int control_brightness_track_x;
+    int control_brightness_track_w;
+    int control_brightness_knob_size;
     lv_obj_t *status_items[5];
     int status_kinds[5];
     int status_item_count;
@@ -130,6 +138,7 @@ typedef struct {
 
     lv_obj_t *modal;
     lv_obj_t *overview_stage;
+    lv_obj_t *overview_main_card;
     lv_obj_t *overview_cards[16];
     int overview_card_count;
     lv_obj_t *modal_input;
@@ -164,6 +173,7 @@ void ui_update_nav_focus(struct App *app);
 void ui_update_app_badge(struct App *app);
 void ui_update_store_badge(struct App *app);
 void ui_update_volume_modal(struct App *app);
+void ui_update_brightness_modal(struct App *app);
 void ui_fade_in_modal(struct App *app);
 void ui_fade_out_modal(struct App *app);
 void ui_set_input_active(bool active);
@@ -186,9 +196,15 @@ lv_obj_t *ui_round_panel(lv_obj_t *parent, int x, int y, int w, int h, int radiu
 void ui_set_focus_ring(lv_obj_t *obj, bool focused, uint32_t accent);
 uint32_t ui_focus_accent(int index);
 void ui_set_card_focus(lv_obj_t *obj, bool focused, uint32_t accent);
+/* Scroll obj into view only when it is actually outside the parent's content
+ * area. During ui_build() the animation is forced off so a rebuilt list does
+ * not visibly scroll back from the top. */
+void ui_scroll_into_view(lv_obj_t *obj, bool allow_anim);
+void ui_scrollbar_style(lv_obj_t *obj);
 char *ui_img_src(const char *path);
 void ui_screen_background(struct App *app, const char *cover_path, uint32_t accent);
 void ui_topbar(struct App *app);
+void ui_button_hint(struct App *app, char *out, size_t out_size, const char *fmt);
 void ui_footer_pill(struct App *app, const char *title, int count,
                     const char *a, const char *b, const char *x, const char *y);
 lv_obj_t *ui_click_card(lv_obj_t *parent, int x, int y, int w, int h, int radius,
@@ -202,6 +218,7 @@ void ui_build_overview(struct App *app);
 void ui_build_games(struct App *app, const char *collection_id);
 void ui_build_settings(struct App *app);
 void ui_build_files(struct App *app);
+void ui_build_editor(struct App *app);
 void ui_build_store(struct App *app);
 void ui_update_files(struct App *app);
 void ui_update_home(struct App *app);
@@ -216,6 +233,8 @@ void ui_build_modal_menu(struct App *app);
 void ui_build_modal_roots(struct App *app);
 void ui_build_modal_mapping(struct App *app);
 void ui_build_modal_help(struct App *app);
+void ui_build_modal_editor_help(struct App *app);
+void ui_build_modal_smb_share(struct App *app);
 void ui_build_modal_scan(struct App *app);
 void ui_build_apps(struct App *app);
 void ui_update_apps(struct App *app);

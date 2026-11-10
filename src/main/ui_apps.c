@@ -11,12 +11,25 @@
 typedef struct {
     App *app;
     int index;
+    bool long_fired;
+    bool pressed;
+    uint32_t press_ms;
 } AppClickCtx;
 
 typedef struct {
     App *app;
     int cat;
 } AppCatCtx;
+
+typedef struct {
+    App *app;
+    int row;
+} AppEditRowCtx;
+
+typedef struct {
+    App *app;
+    int dir;
+} AppCatNavCtx;
 
 static void ctx_free(lv_event_t *e)
 {
@@ -38,6 +51,10 @@ static void app_card_clicked(lv_event_t *e)
 {
     AppClickCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
+    if (ctx->long_fired) {
+        ctx->long_fired = false;
+        return;
+    }
     App *app = ctx->app;
     app->app_on_categories = false;
     for (int i = 0; i < app->app_filter_count; i++) {
@@ -49,6 +66,56 @@ static void app_card_clicked(lv_event_t *e)
     }
     audio_play(SND_ENTER);
     app_launch_external(app);
+}
+
+static void app_edit_row_free(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+static void app_edit_row_clicked(lv_event_t *e)
+{
+    AppEditRowCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    App *app = ctx->app;
+    app->app_edit_row = ctx->row;
+    ui_update_modal_app(app);
+    audio_play(SND_NAV);
+    app_input(app, IN_CONFIRM, NULL);
+}
+
+static void app_card_pressed(lv_event_t *e)
+{
+    AppClickCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    ctx->pressed = true;
+    ctx->press_ms = lv_tick_get();
+}
+
+static void app_card_released(lv_event_t *e)
+{
+    AppClickCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx || !ctx->pressed) return;
+    ctx->pressed = false;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev && (lv_indev_get_scroll_obj(indev) ||
+                  lv_indev_get_scroll_dir(indev) != LV_DIR_NONE ||
+                  lv_indev_get_gesture_dir(indev) != LV_DIR_NONE))
+        return;
+    if (lv_tick_get() - ctx->press_ms < 450) return;
+
+    App *app = ctx->app;
+    ctx->long_fired = true;
+    app->app_on_categories = false;
+    for (int i = 0; i < app->app_filter_count; i++) {
+        if (app->app_filter[i] == ctx->index) {
+            app->app_focus = i;
+            app->app_focus_want = i;
+            break;
+        }
+    }
+    audio_play(SND_NAV_STRONG);
+    app_open_app_editor(app, ctx->index);
 }
 
 static void category_clicked(lv_event_t *e)
@@ -115,6 +182,23 @@ static int category_count(App *app, const char *id)
     return n;
 }
 
+static void apps_add_btn_cb(lv_event_t *e)
+{
+    app_input(lv_event_get_user_data(e), IN_Y, NULL);
+}
+
+static void category_nav_free(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+static void category_nav_clicked(lv_event_t *e)
+{
+    AppCatNavCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx) return;
+    app_input(ctx->app, ctx->dir > 0 ? IN_RT : IN_LT, NULL);
+}
+
 static lv_obj_t *build_category_nav(App *app, int x, int w, const char *label, bool right)
 {
     UiLayout *L = &app->layout;
@@ -134,6 +218,12 @@ static lv_obj_t *build_category_nav(App *app, int x, int w, const char *label, b
     else snprintf(hint, sizeof(hint), LV_SYMBOL_LEFT " %s", label);
     ui_label_center(nav, hint, w >= 48 ? FONT_SM : FONT_XS, PAL.accent2,
                     0, (L->app_cat_h - (w >= 48 ? 20 : 16)) / 2, w, 20);
+    lv_obj_add_flag(nav, LV_OBJ_FLAG_CLICKABLE);
+    AppCatNavCtx *ctx = xmalloc(sizeof(*ctx));
+    ctx->app = app;
+    ctx->dir = right ? 1 : -1;
+    lv_obj_add_event_cb(nav, category_nav_clicked, LV_EVENT_CLICKED, ctx);
+    lv_obj_add_event_cb(nav, category_nav_free, LV_EVENT_DELETE, ctx);
     return nav;
 }
 
@@ -296,6 +386,11 @@ static void build_app_card(App *app, AppEntry *entry, int global_index, int slot
     AppClickCtx *ctx = xmalloc(sizeof(*ctx));
     ctx->app = app;
     ctx->index = global_index;
+    ctx->long_fired = false;
+    ctx->pressed = false;
+    ctx->press_ms = 0;
+    lv_obj_add_event_cb(card, app_card_pressed, LV_EVENT_PRESSED, ctx);
+    lv_obj_add_event_cb(card, app_card_released, LV_EVENT_RELEASED, ctx);
     lv_obj_add_event_cb(card, app_card_clicked, LV_EVENT_CLICKED, ctx);
     lv_obj_add_event_cb(card, ctx_free, LV_EVENT_DELETE, ctx);
     app->ui.app_cards[slot] = card;
@@ -330,12 +425,21 @@ void ui_build_apps(App *app)
 
     char sub[160];
     int cat_count = category_count(app, app->app_cat);
-    snprintf(sub, sizeof(sub), "%s / %d 个应用 / Guide 或 Home 返回",
+    snprintf(sub, sizeof(sub), "%s / %d 个应用 / %s 返回",
              app->app_cat[0] ? apps_category_label(apps_category_index(app->app_cat)) : "全部",
-             cat_count);
+             cat_count, backend_guide_label(&app->backend));
+    int sub_w = L->w - L->pad * 2 - 110;
+    if (sub_w < 80) sub_w = 80;
     app->ui.app_grid_count = ui_label(app->ui.root, sub, FONT_XS, PAL.text2,
-                                      L->pad, L->content_y,
-                                      L->w - L->pad * 2, 22);
+                                      L->pad, L->content_y, sub_w, 22);
+    lv_obj_t *add = ui_rect(app->ui.root, L->w - L->pad - 96,
+                            L->content_y - 3, 96, 28, 14, PAL.card);
+    lv_obj_set_style_bg_opa(add, 170, 0);
+    lv_obj_set_style_border_width(add, 1, 0);
+    lv_obj_set_style_border_color(add, lv_color_hex(PAL.accent2), 0);
+    lv_obj_add_flag(add, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(add, "+ 新增", FONT_XS, PAL.accent2, 0, 5, 96, 18);
+    lv_obj_add_event_cb(add, apps_add_btn_cb, LV_EVENT_CLICKED, app);
 
     /* Scale the shoulder pills with the content padding.  Absolute caps made
      * them shrink to half size on HiDPI, where the logical canvas is 2x. */
@@ -408,7 +512,7 @@ void ui_build_apps(App *app)
         lv_obj_set_style_pad_all(grid, 0, 0);
         lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
         lv_obj_set_scroll_dir(grid, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
+        ui_scrollbar_style(grid);
         lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(grid, scroll_settled, LV_EVENT_SCROLL, NULL);
         lv_obj_add_event_cb(grid, scroll_settled, LV_EVENT_SCROLL_END, NULL);
@@ -430,9 +534,13 @@ void ui_build_apps(App *app)
         lv_obj_t *ring = lv_obj_create(grid);
         lv_obj_remove_style_all(ring);
         lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(ring, 3, 0);
-        lv_obj_set_style_border_color(ring, lv_color_hex(PAL.accent2), 0);
+        lv_obj_set_style_border_width(ring, 5, 0);
+        lv_obj_set_style_border_color(ring, lv_color_hex(PAL.border_focus), 0);
         lv_obj_set_style_border_opa(ring, LV_OPA_COVER, 0);
+        lv_obj_set_style_shadow_width(ring, app->config.low_power ? 0 : 22, 0);
+        lv_obj_set_style_shadow_color(ring, lv_color_hex(PAL.border_focus), 0);
+        lv_obj_set_style_shadow_opa(ring, app->config.low_power ? 0 : 85, 0);
+        lv_obj_set_style_shadow_spread(ring, app->config.low_power ? 0 : 2, 0);
         lv_obj_remove_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(ring, LV_OBJ_FLAG_IGNORE_LAYOUT);
@@ -523,11 +631,10 @@ void ui_update_apps(App *app)
                             lv_obj_get_width(card), lv_obj_get_height(card));
             lv_obj_set_style_radius(app->ui.app_focus_ring,
                                     lv_obj_get_style_radius(card, 0), 0);
-            {
-                int gi = app->ui.app_card_indices[f];
-                lv_obj_set_style_border_color(app->ui.app_focus_ring,
-                    lv_color_hex(ui_focus_accent(gi)), 0);
-            }
+            lv_obj_set_style_border_color(app->ui.app_focus_ring,
+                lv_color_hex(PAL.border_focus), 0);
+            lv_obj_set_style_shadow_width(app->ui.app_focus_ring,
+                app->config.low_power ? 0 : 22, 0);
             lv_obj_clear_flag(app->ui.app_focus_ring, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(app->ui.app_focus_ring);
             lv_obj_invalidate(app->ui.app_focus_ring);
@@ -546,9 +653,10 @@ void ui_update_apps(App *app)
     }
     if (app->ui.app_grid_count) {
         char sub[160];
-        snprintf(sub, sizeof(sub), "%s / %d 个应用 / Guide 或 Home 返回",
+        snprintf(sub, sizeof(sub), "%s / %d 个应用 / %s 返回",
                  apps_category_label(apps_category_index(app->app_cat)),
-                 category_count(app, app->app_cat));
+                 category_count(app, app->app_cat),
+                 backend_guide_label(&app->backend));
         lv_label_set_text(app->ui.app_grid_count, sub);
     }
     ui_footer_update(app, "应用", app->app_filter_count);
@@ -587,7 +695,10 @@ void ui_build_modal_app(App *app)
     int edit_sub_h = ui_text_height(FONT_XS);
     ui_label(panel, "应用设置", FONT_XL, PAL.text, inner, 12,
              w - inner * 2, edit_title_h);
-    ui_label(panel, "上下 选择 / 左右 修改 / A 编辑 / B 保存", FONT_XS,
+    char edit_hint[96];
+    ui_button_hint(app, edit_hint, sizeof(edit_hint),
+                   "上下 选择 / 左右 修改 / {A} 编辑 / {B} 保存");
+    ui_label(panel, edit_hint, FONT_XS,
              PAL.text3, inner, 12 + edit_title_h, w - inner * 2, edit_sub_h);
 
     const char *labels[11] = {
@@ -607,7 +718,7 @@ void ui_build_modal_app(App *app)
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    ui_scrollbar_style(list);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     app->ui.app_edit_list = list;
     app->ui.app_edit_row_count = 11;
@@ -636,6 +747,11 @@ void ui_build_modal_app(App *app)
         lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
         app->ui.app_edit_rows[row] = r;
         app->ui.app_edit_values[row] = v;
+        AppEditRowCtx *ectx = xmalloc(sizeof(*ectx));
+        ectx->app = app;
+        ectx->row = row;
+        lv_obj_add_event_cb(r, app_edit_row_clicked, LV_EVENT_CLICKED, ectx);
+        lv_obj_add_event_cb(r, app_edit_row_free, LV_EVENT_DELETE, ectx);
     }
     if (app->app_edit_row >= 0 && app->app_edit_row < 11 &&
         app->ui.app_edit_rows[app->app_edit_row])
@@ -663,5 +779,5 @@ void ui_update_modal_app(App *app)
     }
     if (app->app_edit_row >= 0 && app->app_edit_row < app->ui.app_edit_row_count &&
         app->ui.app_edit_rows[app->app_edit_row])
-        lv_obj_scroll_to_view(app->ui.app_edit_rows[app->app_edit_row], LV_ANIM_ON);
+        ui_scroll_into_view(app->ui.app_edit_rows[app->app_edit_row], true);
 }

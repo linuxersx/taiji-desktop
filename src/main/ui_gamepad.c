@@ -29,7 +29,7 @@ static lv_obj_t *pad_label(App *app, lv_obj_t *panel, int img_x, int img_y,
                            const char *text)
 {
     (void)app;
-    int w = ui_clamp(img_w * 8 / 100, 36, 72);
+    int w = ui_clamp(img_w * 12 / 100, 40, 96);
     int h = ui_clamp(img_h * 6 / 100, 20, 32);
     int x = img_x + img_w * rx / 1000 - w / 2;
     int y = img_y + img_h * ry / 1000 - h / 2;
@@ -118,8 +118,10 @@ void ui_build_modal_gamepad(App *app)
     g_last_pressed[0] = '\0';
     lv_obj_t *panel = ui_modal_panel(app, 900, 620);
     ui_label(panel, "手柄测试", FONT_XL, PAL.text, 30, 22, 600, 36);
-    ui_label(panel, "按下手柄按键，图片上会标记；Xbox 布局", FONT_XS, PAL.text2,
-             30, 62, 720, 20);
+    char subtitle[160];
+    snprintf(subtitle, sizeof(subtitle), "%s，按下手柄按键，图片上会标记",
+             backend_layout_name(&app->backend));
+    ui_label(panel, subtitle, FONT_XS, PAL.text2, 30, 62, 720, 20);
     lv_obj_t *line = ui_rect(panel, 30, 92, 840, 1, 0, PAL.border);
     lv_obj_set_style_bg_opa(line, 150, 0);
 
@@ -131,26 +133,48 @@ void ui_build_modal_gamepad(App *app)
     }
     free(path);
 
+    const char *sh_l = backend_shoulder_left_label(&app->backend);
+    const char *sh_r = backend_shoulder_right_label(&app->backend);
+    const char *tr_l = backend_trigger_left_label(&app->backend);
+    const char *tr_r = backend_trigger_right_label(&app->backend);
+    const char *btn_a = backend_button_confirm_label(&app->backend);
+    const char *btn_b = backend_button_cancel_label(&app->backend);
+    const char *btn_x = backend_button_west_label(&app->backend);
+    const char *btn_y = backend_button_north_label(&app->backend);
+    const char *btn_back = backend_back_label(&app->backend);
+    const char *btn_start = backend_start_label(&app->backend);
+    const char *btn_guide = backend_guide_label(&app->backend);
+
     g_dpad_label = pad_label(app, panel, ix, iy, iw, ih, 200, 495, "D-Pad");
     add_key(g_dpad_label, "D-Pad", 100, 0);
 
-    lv_obj_t *l_lb = pad_label(app, panel, ix, iy, iw, ih, 322, 207, "LB");
-    add_key(l_lb, "LB", 0, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
-    lv_obj_t *l_rb = pad_label(app, panel, ix, iy, iw, ih, 678, 207, "RB");
-    add_key(l_rb, "RB", 0, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
-    lv_obj_t *l_lt = pad_label(app, panel, ix, iy, iw, ih, 322, 90, "LT");
-    add_key(l_lt, "LT", 1, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-    lv_obj_t *l_rt = pad_label(app, panel, ix, iy, iw, ih, 678, 90, "RT");
-    add_key(l_rt, "RT", 1, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    lv_obj_t *l_lb = pad_label(app, panel, ix, iy, iw, ih, 322, 207, sh_l);
+    add_key(l_lb, sh_l, 0, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    lv_obj_t *l_rb = pad_label(app, panel, ix, iy, iw, ih, 678, 207, sh_r);
+    add_key(l_rb, sh_r, 0, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    lv_obj_t *l_lt = pad_label(app, panel, ix, iy, iw, ih, 322, 90, tr_l);
+    add_key(l_lt, tr_l, 1, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    lv_obj_t *l_rt = pad_label(app, panel, ix, iy, iw, ih, 678, 90, tr_r);
+    add_key(l_rt, tr_r, 1, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
 
-    lv_obj_t *l_a = pad_label(app, panel, ix, iy, iw, ih, 750, 395, "A");
-    add_key(l_a, "A", 0, SDL_CONTROLLER_BUTTON_A);
-    lv_obj_t *l_b = pad_label(app, panel, ix, iy, iw, ih, 817, 510, "B");
-    add_key(l_b, "B", 0, SDL_CONTROLLER_BUTTON_B);
-    lv_obj_t *l_x = pad_label(app, panel, ix, iy, iw, ih, 683, 510, "X");
-    add_key(l_x, "X", 0, SDL_CONTROLLER_BUTTON_X);
-    lv_obj_t *l_y = pad_label(app, panel, ix, iy, iw, ih, 750, 625, "Y");
-    add_key(l_y, "Y", 0, SDL_CONTROLLER_BUTTON_Y);
+    bool switch_layout = app->backend.controller &&
+                         app->backend.controller_family == 3;
+    int ax = 750, ay = 625, bx = 817, by = 510;
+    int xx = 683, xy = 510, yx = 750, yy = 395;
+    if (switch_layout) {
+        ax = 817; ay = 510;
+        bx = 750; by = 625;
+        xx = 750; xy = 395;
+        yx = 683; yy = 510;
+    }
+    lv_obj_t *l_a = pad_label(app, panel, ix, iy, iw, ih, ax, ay, btn_a);
+    add_key(l_a, btn_a, 0, SDL_CONTROLLER_BUTTON_A);
+    lv_obj_t *l_b = pad_label(app, panel, ix, iy, iw, ih, bx, by, btn_b);
+    add_key(l_b, btn_b, 0, SDL_CONTROLLER_BUTTON_B);
+    lv_obj_t *l_x = pad_label(app, panel, ix, iy, iw, ih, xx, xy, btn_x);
+    add_key(l_x, btn_x, 0, SDL_CONTROLLER_BUTTON_X);
+    lv_obj_t *l_y = pad_label(app, panel, ix, iy, iw, ih, yx, yy, btn_y);
+    add_key(l_y, btn_y, 0, SDL_CONTROLLER_BUTTON_Y);
 
     bool compact = app->layout.w < 600;
     if (!compact) {
@@ -159,16 +183,19 @@ void ui_build_modal_gamepad(App *app)
         lv_obj_t *l_r3 = pad_label(app, panel, ix, iy, iw, ih, 670, 673, "R3");
         add_key(l_r3, "R3", 0, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
 
-        lv_obj_t *l_back = pad_label(app, panel, ix, iy, iw, ih, 405, 525, "Back");
-        add_key(l_back, "Back", 0, SDL_CONTROLLER_BUTTON_BACK);
-        lv_obj_t *l_start = pad_label(app, panel, ix, iy, iw, ih, 595, 525, "Start");
-        add_key(l_start, "Start", 0, SDL_CONTROLLER_BUTTON_START);
-        lv_obj_t *l_guide = pad_label(app, panel, ix, iy, iw, ih, 500, 375, "Guide");
-        add_key(l_guide, "Guide", 0, SDL_CONTROLLER_BUTTON_GUIDE);
+        lv_obj_t *l_back = pad_label(app, panel, ix, iy, iw, ih, 405, 525, btn_back);
+        add_key(l_back, btn_back, 0, SDL_CONTROLLER_BUTTON_BACK);
+        lv_obj_t *l_start = pad_label(app, panel, ix, iy, iw, ih, 595, 525, btn_start);
+        add_key(l_start, btn_start, 0, SDL_CONTROLLER_BUTTON_START);
+        lv_obj_t *l_guide = pad_label(app, panel, ix, iy, iw, ih, 500, 375, btn_guide);
+        add_key(l_guide, btn_guide, 0, SDL_CONTROLLER_BUTTON_GUIDE);
     }
 
     g_status = ui_label_center(panel, app->backend.controller ? "按下手柄按键" : "未连接手柄",
                                FONT_LG, PAL.accent2, 0, 568, 900, 30);
-    ui_label_center(panel, "B / Esc 返回", FONT_XS, PAL.text3, 0, 598, 900, 18);
+    char back_hint[48];
+    snprintf(back_hint, sizeof(back_hint), "%s / Esc 返回",
+             backend_button_cancel_label(&app->backend));
+    ui_label_center(panel, back_hint, FONT_XS, PAL.text3, 0, 598, 900, 18);
     ui_gamepad_poll(app);
 }

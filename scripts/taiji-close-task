@@ -35,6 +35,10 @@ if [ -n "$PID" ] && ! pid_alive "$PID"; then
     PGID=""
 fi
 
+# Drop the task record before the (up to one second) TERM/KILL wait so the
+# app menu stops showing the paused badge as soon as the user comes back.
+[ -n "$TASK_FILE" ] && rm -f "$TASK_FILE" 2>/dev/null || true
+
 if [ -n "$PGID" ] && [ "$PGID" -gt 0 ] 2>/dev/null; then
     kill -TERM "-$PGID" 2>/dev/null || true
     sleep 1
@@ -44,8 +48,6 @@ elif [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
     sleep 1
     kill -KILL "$PID" 2>/dev/null || true
 fi
-
-[ -n "$TASK_FILE" ] && rm -f "$TASK_FILE" 2>/dev/null || true
 
 cur=$(sed -n 's/^app_id=//p' "$STATE_FILE" 2>/dev/null | head -n 1)
 if [ "$cur" = "$ID" ]; then

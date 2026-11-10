@@ -36,6 +36,7 @@ typedef enum {
     SCREEN_FILES,
     SCREEN_SETTINGS,
     SCREEN_OVERVIEW,
+    SCREEN_EDITOR,
 } Screen;
 
 typedef enum {
@@ -53,6 +54,7 @@ typedef enum {
     FILE_LOC_SHARE,
     FILE_LOC_CONNECT,
     FILE_LOC_MTP,        /* USB MTP 设置入口 */
+    FILE_LOC_MANAGE,     /* 共享管理入口 */
 } FileLocKind;
 
 typedef struct {
@@ -92,11 +94,13 @@ typedef enum {
     MODAL_ROOTS,
     MODAL_MAPPING,
     MODAL_HELP,
+    MODAL_EDITOR_HELP,
     MODAL_SCAN,
     MODAL_APP,
     MODAL_CONTROL,
     MODAL_POWER,
     MODAL_GAMEPAD,
+    MODAL_SMB_SHARE,
 } ModalKind;
 
 typedef enum {
@@ -116,6 +120,11 @@ typedef enum {
     TEXT_AUTO_LIGHT,
     TEXT_TIMEZONE,
     TEXT_EXTRACT_DIR,
+    TEXT_EDITOR_LINE,
+    TEXT_SMB_SHARE_PATH,
+    TEXT_SMB_SHARE_NAME,
+    TEXT_SMB_AUTH_USER,
+    TEXT_SMB_AUTH_PASS,
 } TextPurpose;
 
 typedef enum {
@@ -130,7 +139,24 @@ typedef enum {
     CHOICE_ARCHIVE_FORMAT,
     CHOICE_OPEN_WITH,
     CHOICE_EXTRACT_TARGET,
+    CHOICE_CORE,
 } ChoicePurpose;
+
+typedef enum {
+    CORE_ITEM_AUTO = 0,
+    CORE_ITEM_CORE,
+    CORE_ITEM_ALL,
+    CORE_ITEM_MANUAL,
+    CORE_ITEM_BACK,
+} CoreItemKind;
+
+typedef struct {
+    char label[160];
+    char core[64];
+    char path[512];
+    CoreItemKind kind;
+    bool compatible;
+} CoreChoiceItem;
 
 typedef enum {
     CONFIRM_QUIT = 0,
@@ -141,6 +167,7 @@ typedef enum {
     CONFIRM_PAUSE_LIMIT,
     CONFIRM_PASTE_OVERWRITE,
     CONFIRM_FILE_DELETE_PERM,
+    CONFIRM_EDITOR_DISCARD,
 } ConfirmPurpose;
 
 typedef enum {
@@ -169,6 +196,10 @@ typedef enum {
     MENU_FILE_HOME,
     MENU_FILE_ROOT,
     MENU_FILE_OPEN_WITH,
+    MENU_FILE_FAVORITE,
+    MENU_FILE_EDIT,
+    MENU_FILE_NEW_TEXT,
+    MENU_FILE_SHARE,
     MENU_FILE_PROPERTIES,
     MENU_QUIT,
     MENU_BACK,
@@ -183,6 +214,77 @@ typedef struct {
     int count;
     uint32_t accent;
 } Collection;
+
+#define SMB_SCAN_MAX 64
+#define SMB_SCAN_SHARES 16
+#define SMB_LOCAL_MAX 64
+
+typedef struct {
+    char addr[64];
+    char name[96];
+    int share_count;
+    char shares[SMB_SCAN_SHARES][96];
+} SmbScannedHost;
+
+typedef struct {
+    char name[96];
+    char path[PATH_MAX];
+    bool writable;
+} SmbLocalShare;
+
+typedef enum {
+    FILES_PANEL_LIST = 0,
+    FILES_PANEL_CONNECT,
+    FILES_PANEL_MANAGE,
+} FilesPanel;
+
+typedef struct {
+    int panel;
+    int focus;
+    int view;                 /* connect panel: 0 servers, 1 shares */
+    bool scan_running;
+    bool scan_done;
+    bool scan_ok;
+    char scan_msg[192];
+    SmbScannedHost hosts[SMB_SCAN_MAX];
+    int host_count;
+    int host_sel;
+    int share_sel;
+    int share_count;
+    char shares[SMB_SCAN_SHARES][96];
+    SmbLocalShare local[SMB_LOCAL_MAX];
+    int local_count;
+    bool service_on;
+    bool helper_ok;
+    char service_msg[128];
+    int edit_index;           /* local share being edited, -1 = new */
+    int edit_focus;
+    char pending_path[PATH_MAX];
+    bool pending_writable;
+    char user[128];
+    char pass[256];
+    char auth_host[64];
+    bool auth_required;
+} SmbUi;
+
+#define EDITOR_MAX_LINES 20000
+#define EDITOR_LINE_MAX 2000
+
+typedef struct {
+    char path[PATH_MAX];
+    char name[160];
+    char **lines;
+    int count;
+    int cap;
+    int focus;
+    int col;
+    int want_col;
+    int top;
+    bool dirty;
+    bool active;
+    bool editing;
+    char status[160];
+} EditorState;
 
 typedef struct App {
     Backend backend;
@@ -219,8 +321,14 @@ typedef struct App {
     int overview_focus;
     Screen overview_return_screen;
     bool overview_animate;
+    int overview_slide_dir;   /* -1 enter from left, +1 enter from right */
     bool overview_kill_armed;
     int overview_kill_index;
+    int overview_close_pending;  /* index queued after the swipe-up animation */
+    int pending_input_action;    /* gesture-generated input, run from ui_tick */
+    int pending_overview_focus;  /* gesture-selected card, run from ui_tick */
+    int pending_overview_activate;
+    bool pending_overview_close;
     uint32_t overview_kill_at;
 
     Screen screen;
@@ -295,6 +403,13 @@ typedef struct App {
     char file_info_time[64];
     char file_info_path[PATH_MAX];
     int choice_focus;
+    CoreChoiceItem core_items[64];
+    int core_item_count;
+    char core_platform_id[80];
+    char core_pending_game_id[80];
+    bool core_picker_launch;
+    bool core_picker_all;
+    bool core_scrolled;
     int confirm_focus;
     int roots_focus;
     char modal_title[160];
@@ -329,7 +444,10 @@ typedef struct App {
     int files_marked_count;
     bool files_show_hidden;
     bool files_loaded;
+    EditorState editor;
+    SmbUi smb_ui;
     FilesPickMode files_pick;
+    FilesPanel files_panel;
     Screen files_pick_return;
     FileLoc files_locs[FILE_LOC_MAX];
     int files_loc_count;
@@ -429,6 +547,7 @@ typedef struct App {
     int files_open_with_apps[64];
     int files_open_with_count;
     int files_open_with_default;
+    bool files_open_with_builtin;
     char pad_left_label[8];
     char pad_right_label[8];
     int64_t launch_started;
@@ -488,6 +607,8 @@ void app_control_connect(App *app, int index);
 void app_control_connect_bluetooth(App *app, int index);
 void app_control_volume(App *app, int delta);
 void app_control_volume_set(App *app, int volume);
+void app_brightness_set(App *app, int percent);
+void app_brightness_step(App *app, int delta);
 void app_set_language(App *app, int lang);
 int app_timezone_option_count(App *app);
 const char *app_timezone_option_id(App *app, int index);
@@ -535,10 +656,15 @@ void app_files_open_with_begin(App *app);
 void app_files_open_with(App *app, int app_index, bool set_default);
 void app_files_compress_now(App *app, int format);
 void app_files_menu_action(App *app, MenuAction action);
+bool app_files_favorite_path(App *app, char *out, size_t n);
+bool app_files_favorite_contains(const char *path);
+void app_files_favorite_toggle(App *app);
 void input_files(App *app, InputAction action);
 bool app_files_available(void);
 bool app_files_pick_supported(App *app);
 void app_files_pick_start(App *app);
 void app_files_smb_text_done(App *app);
+void app_files_share_text_done(App *app);
+void app_files_smb_auth_done(App *app);
 
 #endif

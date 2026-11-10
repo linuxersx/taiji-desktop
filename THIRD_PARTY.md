@@ -15,6 +15,11 @@ LVGL is licensed under the MIT License. See `third_party/lvgl/LICENCE.txt`.
 Copyright 2018 The ZCOOL QingKe HuangYou Project Authors.
 Licensed under the SIL Open Font License 1.1. See `assets/fonts/OFL.txt`.
 
+## Adwaita Sans (button symbol subset)
+`assets/fonts/TaijiButtons.ttf` is a subset of Adwaita Sans containing only
+the PlayStation button symbols `× ○ □ △`. Adwaita Sans is licensed under the
+Apache License 2.0. See `assets/fonts/LICENSE-AdwaitaSans.txt`.
+
 ## Original Taiji / NovaRetro assets
 `assets/platform_logos`, `assets/sounds` and `assets/images/splash.jpg` are
 original works of the Taiji Desktop project authors and are distributed under

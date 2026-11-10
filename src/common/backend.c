@@ -109,6 +109,7 @@ static void pointer_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 typedef struct {
     bool swap_ab;
     bool swap_xy;
+    bool swap_ps;
     bool custom;
     int confirm_btn;
     int cancel_btn;
@@ -121,6 +122,7 @@ typedef struct {
 static PadMap g_map = {
     .swap_ab = false,
     .swap_xy = false,
+    .swap_ps = false,
     .custom = false,
     .confirm_btn = SDL_CONTROLLER_BUTTON_A,
     .cancel_btn = SDL_CONTROLLER_BUTTON_B,
@@ -130,12 +132,13 @@ static PadMap g_map = {
     .captured_btn = -1,
 };
 
-void backend_configure_gamepad(bool swap_ab, bool swap_xy, bool custom,
-                               int confirm_btn, int cancel_btn,
+void backend_configure_gamepad(bool swap_ab, bool swap_xy, bool swap_ps,
+                               bool custom, int confirm_btn, int cancel_btn,
                                int menu1_btn, int menu2_btn)
 {
     g_map.swap_ab = swap_ab;
     g_map.swap_xy = swap_xy;
+    g_map.swap_ps = swap_ps;
     g_map.custom = custom;
     g_map.confirm_btn = confirm_btn;
     g_map.cancel_btn = cancel_btn;
@@ -306,8 +309,10 @@ static InputAction map_face_button(Backend *b, int button, bool down)
         return IN_NONE;
     }
 
-    if (button == SDL_CONTROLLER_BUTTON_A) return g_map.swap_ab ? IN_PAD_CANCEL : IN_PAD_CONFIRM;
-    if (button == SDL_CONTROLLER_BUTTON_B) return g_map.swap_ab ? IN_PAD_CONFIRM : IN_PAD_CANCEL;
+    bool swap_ab = g_map.swap_ab;
+    if (b->controller_family == 2 && g_map.swap_ps) swap_ab = !swap_ab;
+    if (button == SDL_CONTROLLER_BUTTON_A) return swap_ab ? IN_PAD_CANCEL : IN_PAD_CONFIRM;
+    if (button == SDL_CONTROLLER_BUTTON_B) return swap_ab ? IN_PAD_CONFIRM : IN_PAD_CANCEL;
     if (button == SDL_CONTROLLER_BUTTON_X) return g_map.swap_xy ? IN_Y : IN_X;
     if (button == SDL_CONTROLLER_BUTTON_Y) return g_map.swap_xy ? IN_X : IN_Y;
     return IN_NONE;
@@ -816,6 +821,9 @@ bool backend_init(Backend *b, int width, int height, BackendInputCb cb, void *us
     lv_indev_set_type(b->pointer, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(b->pointer, pointer_read_cb);
     lv_indev_set_user_data(b->pointer, b);
+    /* Android-like touch slop: a finger tap wobbles a few pixels.  Keep it a
+     * click instead of turning it into a scroll. */
+    lv_indev_set_scroll_limit(b->pointer, 20);
 
     /* Open already connected controllers. */
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
@@ -996,6 +1004,82 @@ const char *backend_trigger_right_label(Backend *b)
     if (b->controller_family == 1) return "RT";
     if (b->controller_family == 3) return "ZR";
     return "R2";
+}
+
+static bool controller_is_ps(Backend *b)
+{
+    return b && b->controller && b->controller_family == 2;
+}
+
+static bool confirm_cancel_swapped(Backend *b)
+{
+    bool swapped = g_map.swap_ab;
+    if (controller_is_ps(b) && g_map.swap_ps) swapped = !swapped;
+    return swapped;
+}
+
+const char *backend_button_confirm_label(Backend *b)
+{
+    bool ps = controller_is_ps(b);
+    if (confirm_cancel_swapped(b)) return ps ? "○" : "B";
+    return ps ? "×" : "A";
+}
+
+const char *backend_button_cancel_label(Backend *b)
+{
+    bool ps = controller_is_ps(b);
+    if (confirm_cancel_swapped(b)) return ps ? "×" : "A";
+    return ps ? "○" : "B";
+}
+
+const char *backend_button_west_label(Backend *b)
+{
+    bool ps = controller_is_ps(b);
+    if (g_map.swap_xy) return ps ? "△" : "Y";
+    return ps ? "□" : "X";
+}
+
+const char *backend_button_north_label(Backend *b)
+{
+    bool ps = controller_is_ps(b);
+    if (g_map.swap_xy) return ps ? "□" : "X";
+    return ps ? "△" : "Y";
+}
+
+const char *backend_start_label(Backend *b)
+{
+    if (!b || !b->controller) return "Start";
+    if (b->controller_family == 1) return "Menu";
+    if (b->controller_family == 2) return "Options";
+    if (b->controller_family == 3) return "Plus";
+    return "Start";
+}
+
+const char *backend_back_label(Backend *b)
+{
+    if (!b || !b->controller) return "Back";
+    if (b->controller_family == 1) return "View";
+    if (b->controller_family == 2) return "Create";
+    if (b->controller_family == 3) return "Minus";
+    return "Back";
+}
+
+const char *backend_guide_label(Backend *b)
+{
+    if (!b || !b->controller) return "Guide";
+    if (b->controller_family == 1) return "Guide";
+    if (b->controller_family == 2) return "PS";
+    if (b->controller_family == 3) return "Home";
+    return "Guide";
+}
+
+const char *backend_layout_name(Backend *b)
+{
+    if (!b || !b->controller) return "标准布局";
+    if (b->controller_family == 1) return "Xbox 布局";
+    if (b->controller_family == 2) return "PlayStation 布局";
+    if (b->controller_family == 3) return "Switch 布局";
+    return "标准布局";
 }
 
 int backend_controller_battery(Backend *b)

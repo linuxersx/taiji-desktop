@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 
 Palette PAL;
 lv_font_t *FONT_XS, *FONT_SM, *FONT_MD, *FONT_LG, *FONT_XL, *FONT_XXL, *FONT_HERO;
@@ -77,22 +78,77 @@ int theme_preset_count(void)
     return (int)(sizeof(PRESETS) / sizeof(PRESETS[0]));
 }
 
+#define MAX_SYMBOL_FONTS 16
+static lv_font_t *g_symbol_fonts[MAX_SYMBOL_FONTS];
+static int g_symbol_font_count;
+static void *symbol_font_data;
+static size_t symbol_font_size;
+
+static lv_font_t *montserrat_for_px(int px)
+{
+    if (px <= 12) return (lv_font_t *)&lv_font_montserrat_12;
+    if (px <= 14) return (lv_font_t *)&lv_font_montserrat_14;
+    if (px <= 16) return (lv_font_t *)&lv_font_montserrat_16;
+    if (px <= 20) return (lv_font_t *)&lv_font_montserrat_20;
+    if (px <= 24) return (lv_font_t *)&lv_font_montserrat_24;
+    if (px <= 28) return (lv_font_t *)&lv_font_montserrat_28;
+    if (px <= 32) return (lv_font_t *)&lv_font_montserrat_32;
+    if (px <= 40) return (lv_font_t *)&lv_font_montserrat_40;
+    return (lv_font_t *)&lv_font_montserrat_48;
+}
+
+/* TaijiCJK is a compact CJK subset without geometric symbols.  Use a system
+ * symbol font as a middle fallback so PlayStation's triangle and friends render
+ * instead of showing missing-glyph boxes. */
+static lv_font_t *make_symbol_font(int px)
+{
+    static const char *paths[] = {
+        "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        NULL,
+    };
+    if (!symbol_font_data) {
+        char *asset = asset_path("fonts/TaijiButtons.ttf");
+        if (asset) {
+            symbol_font_data = read_file(asset, &symbol_font_size);
+            free(asset);
+            if (symbol_font_data)
+                fprintf(stderr, "[taiji] using bundled button symbol font\n");
+        }
+        for (int i = 0; !symbol_font_data && paths[i]; i++) {
+            symbol_font_data = read_file(paths[i], &symbol_font_size);
+            if (symbol_font_data)
+                fprintf(stderr, "[taiji] using system symbol font: %s\n", paths[i]);
+        }
+    }
+    if (!symbol_font_data) return NULL;
+    return lv_tiny_ttf_create_data_ex(symbol_font_data, symbol_font_size, px,
+                                      LV_FONT_KERNING_NONE, 2048);
+}
+
+static void destroy_symbol_fonts(void)
+{
+    for (int i = 0; i < g_symbol_font_count; i++)
+        lv_tiny_ttf_destroy(g_symbol_fonts[i]);
+    g_symbol_font_count = 0;
+}
+
 static lv_font_t *make_font(int px)
 {
     if (!font_data) return (lv_font_t *)&lv_font_montserrat_16;
     lv_font_t *f = lv_tiny_ttf_create_data_ex(font_data, font_data_size, px,
                                               LV_FONT_KERNING_NONE, 2048);
     if (!f) return (lv_font_t *)&lv_font_montserrat_16;
-    /* Keep LVGL symbol glyphs in proportion to the CJK text size. */
-    if (px <= 12) f->fallback = (lv_font_t *)&lv_font_montserrat_12;
-    else if (px <= 14) f->fallback = (lv_font_t *)&lv_font_montserrat_14;
-    else if (px <= 16) f->fallback = (lv_font_t *)&lv_font_montserrat_16;
-    else if (px <= 20) f->fallback = (lv_font_t *)&lv_font_montserrat_20;
-    else if (px <= 24) f->fallback = (lv_font_t *)&lv_font_montserrat_24;
-    else if (px <= 28) f->fallback = (lv_font_t *)&lv_font_montserrat_28;
-    else if (px <= 32) f->fallback = (lv_font_t *)&lv_font_montserrat_32;
-    else if (px <= 40) f->fallback = (lv_font_t *)&lv_font_montserrat_40;
-    else f->fallback = (lv_font_t *)&lv_font_montserrat_48;
+    lv_font_t *symbols = make_symbol_font(px);
+    if (symbols) {
+        symbols->fallback = montserrat_for_px(px);
+        f->fallback = symbols;
+        if (g_symbol_font_count < MAX_SYMBOL_FONTS)
+            g_symbol_fonts[g_symbol_font_count++] = symbols;
+    } else {
+        /* Keep LVGL symbol glyphs in proportion to the CJK text size. */
+        f->fallback = montserrat_for_px(px);
+    }
     return f;
 }
 
@@ -112,6 +168,7 @@ void theme_set_scale(float scale)
     if (fabsf(scale - g_font_scale) < 0.01f && FONT_XS) return;
     g_font_scale = scale;
 
+    destroy_symbol_fonts();
     destroy_font(FONT_XS);
     destroy_font(FONT_SM);
     destroy_font(FONT_MD);

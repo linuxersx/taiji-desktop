@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app.h"
+#include "smb_share.h"
 #include "catalog.h"
 #include "theme.h"
 #include "util.h"
@@ -49,6 +50,11 @@ static void search_row_cb(lv_event_t *e)
     app_open_game(ctx->app, ctx->id);
 }
 
+static void search_close_cb(lv_event_t *e)
+{
+    app_close_modal(lv_event_get_user_data(e));
+}
+
 void ui_build_modal_search(App *app)
 {
     lv_obj_t *panel = ui_modal_panel(app, 760, 560);
@@ -66,6 +72,14 @@ void ui_build_modal_search(App *app)
     else snprintf(shown, sizeof(shown), "输入游戏名称...");
     app->ui.modal_input = ui_label(box, shown, FONT_MD, app->search_buf[0] ? PAL.text : PAL.text3,
                                    18, 14, 664, 26);
+    lv_obj_t *sclose = ui_rect(panel, 620, 26, 110, 38, 19, PAL.card);
+    lv_obj_set_style_bg_opa(sclose, 170, 0);
+    lv_obj_set_style_border_width(sclose, 1, 0);
+    lv_obj_set_style_border_color(sclose, lv_color_hex(PAL.border_focus), 0);
+    lv_obj_set_style_border_opa(sclose, 150, 0);
+    lv_obj_add_flag(sclose, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(sclose, "关闭", FONT_SM, PAL.text2, 0, 8, 110, 22);
+    lv_obj_add_event_cb(sclose, search_close_cb, LV_EVENT_CLICKED, app);
 
     GameList list = library_query(&app->library, "all", SORT_NAME, FILTER_ALL, app->search_buf);
     if (app->search_focus >= list.count) app->search_focus = list.count > 0 ? list.count - 1 : 0;
@@ -99,7 +113,10 @@ void ui_build_modal_search(App *app)
             app->ui.modal_list[app->ui.modal_list_count++] = row;
         }
     }
-    ui_label(panel, "上下 选择 / Enter 打开 / Esc 关闭", FONT_XS, PAL.text3, 30, 512, 700, 20);
+    char search_hint[96];
+    ui_button_hint(app, search_hint, sizeof(search_hint),
+                   "上下 选择 / {A} 打开 / {B} 关闭");
+    ui_label(panel, search_hint, FONT_XS, PAL.text3, 30, 512, 700, 20);
     game_list_free(&list);
 }
 
@@ -136,8 +153,9 @@ void ui_build_modal_detail(App *app)
     lv_obj_t *panel = ui_modal_panel(app, 760, 540);
     lv_obj_t *cover = ui_rect(panel, 30, 34, 300, 400, 20, PAL.card_soft);
     lv_obj_set_style_clip_corner(cover, true, 0);
-    if (g->cover_path[0] && file_exists(g->cover_path)) {
+    if (g->cover_path && g->cover_path[0] && file_exists(g->cover_path)) {
         lv_obj_t *img = lv_image_create(cover);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_size(img, ui_scale_x(300), ui_scale_y(400));
         lv_obj_center(img);
@@ -160,13 +178,16 @@ void ui_build_modal_detail(App *app)
     ui_label(panel, catalog_zh_name(g->platform_id), FONT_XS, PAL.accent2, x, 38, 360, 20);
     ui_label(panel, g->name, FONT_XXL, PAL.text, x, 62, 360, 76);
     char meta[512];
-    snprintf(meta, sizeof(meta), "%s%s%s", g->developer[0] ? g->developer : "",
-             g->developer[0] && g->release_date[0] ? "  /  " : "",
-             g->release_date[0] ? g->release_date : "");
+    bool has_dev = g->developer && g->developer[0];
+    bool has_date = g->release_date && g->release_date[0];
+    snprintf(meta, sizeof(meta), "%s%s%s", has_dev ? g->developer : "",
+             has_dev && has_date ? "  /  " : "",
+             has_date ? g->release_date : "");
     ui_label(panel, meta, FONT_SM, PAL.text2, x, 148, 360, 24);
     ui_label(panel, g->favorite ? "已收藏" : "未收藏", FONT_SM,
              g->favorite ? 0xFFFF6B9A : PAL.text3, x, 178, 200, 22);
-    lv_obj_t *desc = ui_label(panel, g->description[0] ? g->description : "暂无游戏简介。",
+    lv_obj_t *desc = ui_label(panel,
+        g->description && g->description[0] ? g->description : "暂无游戏简介。",
                               FONT_SM, PAL.text2, x, 212, 360, 150);
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
     char *played = format_playtime(g->play_seconds);
@@ -189,7 +210,10 @@ void ui_build_modal_detail(App *app)
     ui_label_center(b3, "编辑命令", FONT_SM, PAL.text, 0, 11, 100, 22);
     lv_obj_add_event_cb(b3, detail_edit_cb, LV_EVENT_CLICKED, app);
 
-    ui_label(panel, "A 开始游戏 / Y 收藏 / X 编辑命令 / B 关闭", FONT_XS, PAL.text3, 30, 496, 700, 20);
+    char detail_hint[160];
+    ui_button_hint(app, detail_hint, sizeof(detail_hint),
+                   "{A} 开始游戏 / {Y} 收藏 / {X} 编辑命令 / {B} 关闭");
+    ui_label(panel, detail_hint, FONT_XS, PAL.text3, 30, 496, 700, 20);
 }
 
 /* ── Text ─────────────────────────────────────────────────────────────────── */
@@ -197,6 +221,16 @@ void ui_build_modal_detail(App *app)
 static void text_browse_cb(lv_event_t *e)
 {
     app_files_pick_start(lv_event_get_user_data(e));
+}
+
+static void text_confirm_cb(lv_event_t *e)
+{
+    app_input(lv_event_get_user_data(e), IN_CONFIRM, NULL);
+}
+
+static void text_cancel_cb(lv_event_t *e)
+{
+    app_input(lv_event_get_user_data(e), IN_CANCEL, NULL);
 }
 
 void ui_build_modal_text(App *app)
@@ -224,12 +258,27 @@ void ui_build_modal_text(App *app)
     app->ui.modal_input = ui_label(box, shown, FONT_MD,
                                    app->input_buf[0] ? PAL.text : PAL.text3, 18, 16, 664, 28);
     bool can_browse = app_files_pick_supported(app);
-    const char *hint = "直接输入字符 / Enter 确认 / Esc 取消 / Backspace 删除";
+    const char *hint = "直接输入字符 / {A} 确认 / {B} 取消 / 退格 删除";
     if (can_browse)
         hint = app->text_purpose == TEXT_ROOT ?
-            "Y 浏览目录 / Enter 确认 / Esc 取消 / Backspace 删除" :
-            "Y 浏览文件 / Enter 确认 / Esc 取消 / Backspace 删除";
-    ui_label(panel, hint, FONT_XS, PAL.text3, 30, 292, can_browse ? 560 : 700, 20);
+            "{Y} 浏览目录 / {A} 确认 / {B} 取消 / 退格 删除" :
+            "{Y} 浏览文件 / {A} 确认 / {B} 取消 / 退格 删除";
+    char text_hint[192];
+    ui_button_hint(app, text_hint, sizeof(text_hint), hint);
+    ui_label(panel, text_hint, FONT_XS, PAL.text3, 30, 300,
+             can_browse ? 450 : 480, 20);
+    lv_obj_t *cancel = ui_rect(panel, 520, 288, 90, 40, 20, PAL.card);
+    lv_obj_set_style_bg_opa(cancel, 170, 0);
+    lv_obj_set_style_border_width(cancel, 1, 0);
+    lv_obj_set_style_border_color(cancel, lv_color_hex(PAL.border), 0);
+    lv_obj_add_flag(cancel, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(cancel, "取消", FONT_SM, PAL.text2, 0, 8, 90, 22);
+    lv_obj_add_event_cb(cancel, text_cancel_cb, LV_EVENT_CLICKED, app);
+    lv_obj_t *ok = ui_rect(panel, 620, 288, 110, 40, 20, PAL.accent);
+    lv_obj_set_style_bg_opa(ok, 230, 0);
+    lv_obj_add_flag(ok, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(ok, "确定", FONT_SM, 0xFFFFFFFF, 0, 8, 110, 22);
+    lv_obj_add_event_cb(ok, text_confirm_cb, LV_EVENT_CLICKED, app);
     if (can_browse) {
         lv_obj_t *btn = ui_rect(panel, 620, 26, 110, 38, 19, PAL.card);
         lv_obj_set_style_bg_opa(btn, 170, 0);
@@ -277,16 +326,37 @@ void ui_build_modal_confirm(App *app)
     lv_obj_add_flag(no, LV_OBJ_FLAG_CLICKABLE);
     ui_label_center(no, "取消", FONT_MD, PAL.text, 0, 10, 120, 24);
     lv_obj_add_event_cb(no, confirm_no_cb, LV_EVENT_CLICKED, app);
-    ui_label_center(panel, "左右 选择 / Enter 确认 / Esc 取消", FONT_XS, PAL.text3, 0, 266, 600, 20);
+    char confirm_hint[96];
+    ui_button_hint(app, confirm_hint, sizeof(confirm_hint),
+                   "左右 选择 / {A} 确认 / {B} 取消");
+    ui_label_center(panel, confirm_hint, FONT_XS, PAL.text3, 0, 266, 600, 20);
 }
 
 /* ── Choice ───────────────────────────────────────────────────────────────── */
+
+static void choice_scroll_cb(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (app) app->core_scrolled = true;
+}
+
+static void choice_row_pressed_cb(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (app) app->core_scrolled = false;
+}
 
 static void choice_click_cb(lv_event_t *e)
 {
     ModalCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
     App *app = ctx->app;
+    /* A swipe inside the scrollable core list must not launch the core that
+     * happens to be under the finger when it is released. */
+    if (app->choice_purpose == CHOICE_CORE && app->core_scrolled) {
+        app->core_scrolled = false;
+        return;
+    }
     int values[8] = {0, 4, 5, 6, 7, 8};
     int value = ctx->index;
     if (app->choice_purpose == CHOICE_THEME) value = ctx->index;
@@ -317,7 +387,12 @@ void ui_build_modal_choice(App *app)
 {
     const char *opts[64];
     int n = 0;
-    if (app->choice_purpose == CHOICE_THEME) {
+    app->core_scrolled = false;
+    if (app->choice_purpose == CHOICE_CORE) {
+        n = app->core_item_count;
+        if (n > 64) n = 64;
+        for (int i = 0; i < n; i++) opts[i] = app->core_items[i].label;
+    } else if (app->choice_purpose == CHOICE_THEME) {
         n = theme_preset_count() + 1;
         for (int i = 0; i < n - 1 && i < 7; i++) opts[i] = theme_preset_name(i);
         opts[n - 1] = "自动（深色/浅色）";
@@ -342,10 +417,16 @@ void ui_build_modal_choice(App *app)
         opts[0] = "解压到当前目录";
         opts[1] = "解压到指定目录…";
     } else if (app->choice_purpose == CHOICE_OPEN_WITH) {
-        n = app->files_open_with_count;
+        n = app->files_open_with_count + (app->files_open_with_builtin ? 1 : 0);
         if (n > 64) n = 64;
-        for (int i = 0; i < n; i++)
-            opts[i] = app->apps.apps[app->files_open_with_apps[i]].name;
+        for (int i = 0; i < n; i++) {
+            if (app->files_open_with_builtin) {
+                if (i == 0) { opts[i] = "内置文本编辑器"; continue; }
+                opts[i] = app->apps.apps[app->files_open_with_apps[i - 1]].name;
+            } else {
+                opts[i] = app->apps.apps[app->files_open_with_apps[i]].name;
+            }
+        }
     } else if (app->choice_purpose == CHOICE_ARCHIVE_FORMAT) {
         n = 3;
         opts[0] = "7Z";
@@ -392,35 +473,77 @@ void ui_build_modal_choice(App *app)
         if (start_index < 0) start_index = 0;
         if (start_index + visible > n) start_index = n - visible;
     }
-    for (int i = start_index; i < start_index + visible && i < n; i++) {
+
+    /* Core lists can be long; use a real scroll container so touch users can
+     * reach every core and the trailing "all installed"/"back" rows. */
+    lv_obj_t *list_parent = panel;
+    lv_obj_t *scroll = NULL;
+    int list_x = 30, list_y = 88;
+    if (app->choice_purpose == CHOICE_CORE) {
+        scroll = lv_obj_create(panel);
+        lv_obj_remove_style_all(scroll);
+        lv_obj_set_pos(scroll, ui_scale_x(30), ui_scale_y(88));
+        lv_obj_set_size(scroll, ui_scale_x(540), ui_scale_y(list_h));
+        lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(scroll, 0, 0);
+        lv_obj_set_style_pad_all(scroll, 0, 0);
+        lv_obj_set_style_radius(scroll, 0, 0);
+        lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+        ui_scrollbar_style(scroll);
+        lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(scroll, choice_scroll_cb, LV_EVENT_SCROLL, app);
+        list_parent = scroll;
+        list_x = 0;
+        list_y = 0;
+    }
+    int first = scroll ? 0 : start_index;
+    int last = scroll ? n : start_index + visible;
+    lv_obj_t *focus_row = NULL;
+    for (int i = first; i < last && i < n; i++) {
         bool sel = i == app->choice_focus;
-        int ry = 88 + (i - start_index) * 56;
-        lv_obj_t *row = ui_rect(panel, 30, ry, 540, 48, 14,
+        int ry = list_y + (scroll ? i * 56 : (i - start_index) * 56);
+        lv_obj_t *row = ui_rect(list_parent, list_x, ry, 540, 48, 14,
                                 sel ? PAL.accent : PAL.card);
         lv_obj_set_style_bg_opa(row, sel ? 40 : 80, 0);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, choice_row_pressed_cb, LV_EVENT_PRESSED, app);
         int text_x = 18;
         int text_w = 480;
         if (app->choice_purpose == CHOICE_OPEN_WITH) {
-            int app_index = app->files_open_with_apps[i];
-            AppEntry *ae = &app->apps.apps[app_index];
+            bool builtin = app->files_open_with_builtin;
+            bool is_builtin = builtin && i == 0;
+            int list_index = builtin ? i - 1 : i;
             text_x = 54;
             text_w = 380;
-            char *src = (ae->icon[0] && file_exists(ae->icon)) ?
-                        ui_img_src(ae->icon) : NULL;
-            if (src) {
-                lv_obj_t *icon = lv_image_create(row);
-                lv_obj_remove_style_all(icon);
-                lv_obj_set_pos(icon, 14, 10);
-                lv_obj_set_size(icon, 28, 28);
-                lv_image_set_src(icon, src);
-                lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
-                free(src);
-            } else {
-                ui_label(row, LV_SYMBOL_FILE, FONT_MD, PAL.text2,
+            if (is_builtin) {
+                ui_label(row, LV_SYMBOL_EDIT, FONT_MD, PAL.accent2,
                          14, 12, 28, 26);
+            } else {
+                int app_index = (list_index >= 0 &&
+                                 list_index < app->files_open_with_count) ?
+                                app->files_open_with_apps[list_index] : -1;
+                AppEntry *ae = (app_index >= 0) ? &app->apps.apps[app_index] : NULL;
+                char *src = (ae && ae->icon[0] && file_exists(ae->icon)) ?
+                            ui_img_src(ae->icon) : NULL;
+                if (src) {
+                    lv_obj_t *icon = lv_image_create(row);
+                    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+                    lv_obj_remove_style_all(icon);
+                    lv_obj_set_pos(icon, 14, 10);
+                    lv_obj_set_size(icon, 28, 28);
+                    lv_image_set_src(icon, src);
+                    lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CONTAIN);
+                    free(src);
+                } else {
+                    ui_label(row, LV_SYMBOL_FILE, FONT_MD, PAL.text2,
+                             14, 12, 28, 26);
+                }
             }
-            if (i == app->files_open_with_default) {
+            int def_index = builtin ? app->files_open_with_default + 1
+                                    : app->files_open_with_default;
+            if (is_builtin) {
+                /* The built-in editor has no "set as default" action. */
+            } else if (def_index >= 0 && i == def_index) {
                 ui_label(row, "当前默认", FONT_XS, PAL.accent2,
                          386, 16, 146, 18);
             } else {
@@ -434,7 +557,7 @@ void ui_build_modal_choice(App *app)
                                 0, 5, 76, 16);
                 ModalCtx *dctx = xmalloc(sizeof(*dctx));
                 dctx->app = app;
-                dctx->index = i;
+                dctx->index = list_index;
                 dctx->id[0] = '\0';
                 lv_obj_add_event_cb(def, choice_default_cb, LV_EVENT_CLICKED, dctx);
                 lv_obj_add_event_cb(def, modal_ctx_free, LV_EVENT_DELETE, dctx);
@@ -452,11 +575,28 @@ void ui_build_modal_choice(App *app)
         ctx->id[0] = '\0';
         lv_obj_add_event_cb(row, choice_click_cb, LV_EVENT_CLICKED, ctx);
         lv_obj_add_event_cb(row, modal_ctx_free, LV_EVENT_DELETE, ctx);
+        if (scroll && i == app->choice_focus)
+            focus_row = row;
     }
-    const char *hint = app->choice_purpose == CHOICE_OPEN_WITH ?
-        "上下 选择 / A 仅本次打开 / Y 设为默认 / B 返回" :
-        "上下 选择 / Enter 确认 / Esc 取消";
-    ui_label_center(panel, hint, FONT_XS, PAL.text3, 0, h - 36, 600, 20);
+    if (scroll) {
+        lv_obj_update_layout(scroll);
+        if (focus_row) lv_obj_scroll_to_view(focus_row, LV_ANIM_OFF);
+    }
+    const char *hint;
+    if (app->choice_purpose == CHOICE_CORE)
+        hint = app->core_picker_all ?
+            "上下 选择 / {A} 确认 / {B} 返回兼容核心" :
+            "上下 选择 / {A} 确认 / {B} 取消";
+    else if (app->choice_purpose == CHOICE_OPEN_WITH)
+        hint = (app->files_open_with_builtin &&
+                app->files_open_with_count == 0)
+            ? "上下 选择 / {A} 打开 / {B} 返回"
+            : "上下 选择 / {A} 仅本次打开 / {Y} 设为默认 / {B} 返回";
+    else
+        hint = "上下 选择 / {A} 确认 / {B} 取消";
+    char hintbuf[160];
+    ui_button_hint(app, hintbuf, sizeof(hintbuf), hint);
+    ui_label_center(panel, hintbuf, FONT_XS, PAL.text3, 0, h - 36, 600, 20);
 }
 
 /* ── Menu ─────────────────────────────────────────────────────────────────── */
@@ -503,7 +643,17 @@ static void ui_build_modal_menu_info(App *app)
         lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
         lv_obj_add_event_cb(row, menu_info_close_cb, LV_EVENT_CLICKED, app);
     }
-    ui_label_center(panel, "A / B / Esc 关闭", FONT_XS, PAL.text3, 0, h - 34, 560, 20);
+    char hint[64];
+    ui_button_hint(app, hint, sizeof(hint), "{A} / {B} / Esc 关闭");
+    ui_label_center(panel, hint, FONT_XS, PAL.text3, 0, h - 34, 560, 20);
+}
+
+static int g_menu_scroll_y;
+
+static void menu_scroll_cb(lv_event_t *e)
+{
+    lv_obj_t *list = lv_event_get_target(e);
+    if (list) g_menu_scroll_y = (int)lv_obj_get_scroll_y(list);
 }
 
 void ui_build_modal_menu(App *app)
@@ -511,19 +661,37 @@ void ui_build_modal_menu(App *app)
     if (app->menu_info) {
         ui_build_modal_menu_info(app);
         return;
-    }
-    const char *labels[20];
+    }    const char *labels[20];
     MenuAction acts[20];
     int n = 0;
     app_menu_labels(app, labels, acts, &n);
+    /* Long menus (the file manager has up to 15 entries) used to be scaled
+     * down until the whole list fitted, which made the text unreadable.
+     * Cap the panel to the available height and scroll the rows instead. */
+    UiLayout *L = &app->layout;
+    int max_h = L->h - L->pad * 2;
+    if (max_h < 200) max_h = 200;
     int h = 130 + n * 50;
+    if (h > max_h) h = max_h;
     lv_obj_t *panel = ui_modal_panel(app, 560, h);
     ui_label(panel, "工具菜单", FONT_XL, PAL.text, 30, 26, 500, 34);
     lv_obj_t *line = ui_rect(panel, 30, 72, 500, 1, 0, PAL.border);
     lv_obj_set_style_bg_opa(line, 150, 0);
+    int list_top = 84;
+    int list_h = h - list_top - 46;
+    if (list_h < 50) list_h = 50;
+    lv_obj_t *list = ui_rect(panel, 30, list_top, 500, list_h, 0, PAL.card);
+    lv_obj_set_style_bg_opa(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    ui_scrollbar_style(list);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(list, menu_scroll_cb, LV_EVENT_SCROLL, NULL);
+    app->ui.modal_scroll = list;
+    lv_obj_t *focus_row = NULL;
     for (int i = 0; i < n; i++) {
         bool sel = i == app->menu_focus;
-        lv_obj_t *row = ui_rect(panel, 30, 84 + i * 50, 500, 42, 12,
+        lv_obj_t *row = ui_rect(list, 0, i * 50, 500, 42, 12,
                                 sel ? PAL.accent : PAL.card);
         lv_obj_set_style_bg_opa(row, sel ? 38 : 65, 0);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
@@ -536,8 +704,24 @@ void ui_build_modal_menu(App *app)
         ctx->id[0] = '\0';
         lv_obj_add_event_cb(row, menu_click_cb, LV_EVENT_CLICKED, ctx);
         lv_obj_add_event_cb(row, modal_ctx_free, LV_EVENT_DELETE, ctx);
+        if (sel) focus_row = row;
     }
-    ui_label_center(panel, "上下 选择 / Enter 执行 / Esc 关闭", FONT_XS, PAL.text3, 0, h - 34, 560, 20);
+    if (focus_row) {
+        lv_obj_update_layout(list);
+        lv_obj_scroll_to_y(list, g_menu_scroll_y, LV_ANIM_OFF);
+        int row_y = ui_scale_y(app->menu_focus * 50);
+        int row_h = ui_scale_y(42);
+        int view_h = lv_obj_get_height(list);
+        int sy = (int)lv_obj_get_scroll_y(list);
+        if (row_y < sy)
+            lv_obj_scroll_to_y(list, row_y, LV_ANIM_OFF);
+        else if (row_y + row_h > sy + view_h)
+            lv_obj_scroll_to_y(list, row_y + row_h - view_h, LV_ANIM_OFF);
+    }
+    char hint[128];
+    ui_button_hint(app, hint, sizeof(hint),
+                   "{A} 执行 / 上下 滚动 / {B} 关闭");
+    ui_label_center(panel, hint, FONT_XS, PAL.text3, 0, h - 34, 560, 20);
 }
 
 /* ── Roots ────────────────────────────────────────────────────────────────── */
@@ -578,7 +762,10 @@ void ui_build_modal_roots(App *app)
             lv_obj_add_event_cb(row, modal_ctx_free, LV_EVENT_DELETE, ctx);
         }
     }
-    ui_label(panel, "X 添加目录 / A 移除选中目录 / B 关闭", FONT_XS, PAL.text3, 30, 474, 760, 20);
+    char roots_hint[96];
+    ui_button_hint(app, roots_hint, sizeof(roots_hint),
+                   "{X} 添加目录 / {A} 移除选中目录 / {B} 关闭");
+    ui_label(panel, roots_hint, FONT_XS, PAL.text3, 30, 474, 760, 20);
 }
 
 /* ── Mapping ──────────────────────────────────────────────────────────────── */
@@ -588,7 +775,16 @@ void ui_build_modal_mapping(App *app)
     lv_obj_t *panel = ui_modal_panel(app, 700, 440);
     ui_label(panel, "手动按键映射", FONT_XL, PAL.text, 30, 26, 640, 34);
     ui_label(panel, "依次按下手柄上要绑定的按键。Esc 取消。", FONT_SM, PAL.text2, 30, 66, 640, 24);
-    const char *steps[] = {"确认键（A）", "取消键（B）", "主菜单键（X）", "次菜单键（Y）"};
+    char step_a[64], step_b[64], step_x[64], step_y[64];
+    snprintf(step_a, sizeof(step_a), "确认键（%s）",
+             backend_button_confirm_label(&app->backend));
+    snprintf(step_b, sizeof(step_b), "取消键（%s）",
+             backend_button_cancel_label(&app->backend));
+    snprintf(step_x, sizeof(step_x), "主菜单键（%s）",
+             backend_button_west_label(&app->backend));
+    snprintf(step_y, sizeof(step_y), "次菜单键（%s）",
+             backend_button_north_label(&app->backend));
+    const char *steps[] = {step_a, step_b, step_x, step_y};
     int x = 30;
     for (int i = 0; i < 4; i++) {
         int y = 104 + i * 58;
@@ -605,7 +801,15 @@ void ui_build_modal_mapping(App *app)
         lv_obj_t *v = ui_label(row, val, FONT_SM, cur ? PAL.warning : PAL.text3, 380, 12, 240, 24);
         lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
     }
-    ui_label_center(panel, "捕获后会自动保存并启用自定义映射", FONT_XS, PAL.text3, 0, 392, 700, 20);
+    ui_label(panel, "捕获后会自动保存并启用自定义映射", FONT_XS, PAL.text3,
+             30, 396, 500, 20);
+    lv_obj_t *mcancel = ui_rect(panel, 560, 380, 110, 40, 20, PAL.card);
+    lv_obj_set_style_bg_opa(mcancel, 170, 0);
+    lv_obj_set_style_border_width(mcancel, 1, 0);
+    lv_obj_set_style_border_color(mcancel, lv_color_hex(PAL.border), 0);
+    lv_obj_add_flag(mcancel, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(mcancel, "取消", FONT_SM, PAL.text2, 0, 8, 110, 22);
+    lv_obj_add_event_cb(mcancel, text_cancel_cb, LV_EVENT_CLICKED, app);
     (void)panel_title;
 }
 
@@ -618,41 +822,43 @@ void ui_build_modal_help(App *app)
     lv_obj_t *line = ui_rect(panel, 30, 72, 720, 1, 0, PAL.border);
     lv_obj_set_style_bg_opa(line, 150, 0);
     const char *text = app->layout.w < 800 ?
-        "方向键 移动 / Enter 确认 / Esc 返回\n"
-        "A 开始 / B 关闭或退一层 / X 搜索或编辑 / Y 菜单或新增\n"
-        "L1/R1 切换栏目 / L2-R2 切换应用分类\n"
-        "文件页 L2 隐藏文件 / R2 刷新\n"
-        "Start 工具菜单 / Select 帮助\n"
+        "方向键 移动 / {A} 确认 / {B} 返回\n"
+        "{A} 开始 / {B} 关闭或退一层 / {X} 搜索或编辑 / {Y} 菜单或新增\n"
+        "{L1}/{R1} 切换栏目 / {L2}-{R2} 切换应用分类\n"
+        "文件页 {L2} 隐藏文件 / {R2} 刷新\n"
+        "{START} 工具菜单 / {BACK} 帮助\n"
         "无侧栏页面在首行按上进入顶部导航；有侧栏从侧栏首项按上\n"
         "长按电源键 打开电源菜单\n\n"
-        "应用前台时按 Guide / Home 返回太极\n"
+        "应用前台时按 {GUIDE} 返回太极\n"
         "前台程序默认暂停，可在应用卡片恢复\n\n"
         "F11 全屏 / F5 扫描 / Ctrl+Q 退出\n\n"
         "模拟器命令在 设置 至 模拟器 中配置。\n"
         "%ROM% %NAME% %PLATFORM% %DIR% 为占位符。" :
         "游戏库 / 应用\n"
         "  方向键        移动焦点\n"
-        "  A / Enter     进入平台 / 启动或恢复应用\n"
-        "  B / Esc       关闭弹窗或退一层\n"
-        "  X             搜索 / 编辑应用\n"
-        "  Y / Start     工具菜单 / 新增应用\n"
-        "  L1 / R1       切换顶部栏目\n"
+        "  {A} / Enter   进入平台 / 启动或恢复应用\n"
+        "  {B} / Esc     关闭弹窗或退一层\n"
+        "  {X}           搜索 / 编辑应用\n"
+        "  {Y} / {START} 工具菜单 / 新增应用\n"
+        "  {L1} / {R1}   切换顶部栏目\n"
         "                Xbox: LB/RB  PS: L1/R1  Switch: L/R\n"
-        "  L2 / R2       应用页切换分类\n"
-        "                文件页 L2 隐藏文件 / R2 刷新\n"
+        "  {L2} / {R2}   应用页切换分类\n"
+        "                文件页 {L2} 隐藏文件 / {R2} 刷新\n"
         "                Xbox: LT/RT  PS: L2/R2  Switch: ZL/ZR\n"
         "  方向键        应用页移动到分类栏后左右选择，再按上进入顶部导航\n"
-        "  Select        显示本帮助\n"
+        "  {BACK}        显示本帮助\n"
         "  第一行/侧栏首项  按上进入顶部导航，再向上进入状态栏\n"
         "  长按电源键    打开电源菜单\n\n"
         "应用\n"
-        "  Guide / Home  从外部程序返回太极\n"
+        "  {GUIDE}       从外部程序返回太极\n"
         "  返回行为      默认暂停，可随时恢复\n"
         "  后台音乐      在应用设置中选择继续运行\n\n"
         "窗口与模拟器\n"
         "  F11 全屏 / F5 扫描 / Ctrl+Q 退出\n"
         "  设置 至 模拟器 中可为每个平台填写启动命令。\n"
         "  命令支持 %ROM% / %NAME% / %PLATFORM% / %DIR% 占位符。";
+    char help_text[2048];
+    ui_button_hint(app, help_text, sizeof(help_text), text);
     lv_obj_t *scroll = lv_obj_create(panel);
     lv_obj_remove_style_all(scroll);
     lv_obj_set_pos(scroll, ui_scale_x(36), ui_scale_y(90));
@@ -660,18 +866,141 @@ void ui_build_modal_help(App *app)
     lv_obj_set_style_pad_all(scroll, 0, 0);
     lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
+    ui_scrollbar_style(scroll);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *body = ui_label(scroll, text, FONT_MD, PAL.text2, 0, 0, 750, 600);
+    lv_obj_t *body = ui_label(scroll, help_text, FONT_MD, PAL.text2, 0, 0, 750, 600);
     lv_obj_set_height(body, LV_SIZE_CONTENT);
     lv_obj_set_style_text_line_space(body, 2, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     app->ui.modal_scroll = scroll;
-    ui_label_center(panel, "上下滚动 / A / B / Esc 关闭", FONT_XS, PAL.text3,
-                    0, 578, 840, 20);
+    char close_hint[96];
+    ui_button_hint(app, close_hint, sizeof(close_hint),
+                   "上下 滚动 / {A} / {B} / Esc 关闭");
+    ui_label_center(panel, close_hint, FONT_XS, PAL.text3, 0, 578, 840, 20);
     (void)app;
 }
 
+
+/* ── Editor key hints ─────────────────────────────────────────────────────── */
+
+void ui_build_modal_editor_help(App *app)
+{
+    UiLayout *L = &app->layout;
+    int max_h = L->h - L->pad * 2;
+    if (max_h < 260) max_h = 260;
+    int h = max_h < 392 ? max_h : 392;
+    lv_obj_t *panel = ui_modal_panel(app, 640, h);
+    ui_label(panel, "文本编辑器", FONT_XL, PAL.text, 30, 22, 580, 34);
+    ui_label(panel, "手柄按键 / 键盘按键", FONT_XS, PAL.text3, 30, 58, 580, 18);
+    lv_obj_t *line = ui_rect(panel, 30, 84, 580, 1, 0, PAL.border);
+    lv_obj_set_style_bg_opa(line, 150, 0);
+
+    static const struct { const char *keys; const char *desc; } rows[] = {
+        { "方向键 / 左摇杆", "移动光标（左右可跨行）" },
+        { "{A}",   "呼出屏幕键盘，输入直接插入光标位置" },
+        { "{Y}",   "退格（删除光标前的字符）" },
+        { "{X}",   "在光标处换行" },
+        { "{B}",   "返回文件管理器" },
+        { "{START}", "保存文件" },
+        { "{BACK}", "显示本按键提示" },
+        { "{L1} / {R1}", "上下翻 10 行" },
+        { "{L2} / {R2}", "跳到首行 / 末行" },
+    };
+    int n = (int)(sizeof(rows) / sizeof(rows[0]));
+    int y = 92;
+    for (int i = 0; i < n; i++) {
+        char keys[80];
+        ui_button_hint(app, keys, sizeof(keys), rows[i].keys);
+        ui_label(panel, keys, FONT_MD, PAL.accent2, 34, y, 220, 24);
+        lv_obj_t *d = ui_label(panel, rows[i].desc, FONT_SM, PAL.text2,
+                               260, y + 2, 340, 24);
+        lv_label_set_long_mode(d, LV_LABEL_LONG_DOT);
+        y += 30;
+    }
+    char close_hint[64];
+    ui_button_hint(app, close_hint, sizeof(close_hint), "{A} / {B} 关闭");
+    ui_label_center(panel, close_hint, FONT_XS, PAL.text3, 0, h - 22, 640, 18);
+}
+
+/* ── Local SMB share settings ────────────────────────────────────────────── */
+
+typedef struct {
+    App *app;
+    int index;
+} SmbShareCtx;
+
+static void smb_share_row_cb(lv_event_t *e)
+{
+    SmbShareCtx *ctx = lv_event_get_user_data(e);
+    if (!ctx || !ctx->app) return;
+    ctx->app->smb_ui.edit_focus = ctx->index;
+    app_input(ctx->app, IN_CONFIRM, NULL);
+}
+
+static void smb_share_ctx_free(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+void ui_build_modal_smb_share(App *app)
+{
+    SmbUi *ui = &app->smb_ui;
+    bool is_new = ui->edit_index < 0;
+    SmbLocalShare temp;
+    const SmbLocalShare *sh;
+    if (is_new) {
+        memset(&temp, 0, sizeof(temp));
+        const char *base = strrchr(ui->pending_path, '/');
+        base = base ? base + 1 : ui->pending_path;
+        snprintf(temp.name, sizeof(temp.name), "%s", *base ? base : "share");
+        snprintf(temp.path, sizeof(temp.path), "%s", ui->pending_path);
+        temp.writable = ui->pending_writable;
+        sh = &temp;
+    } else {
+        if (ui->edit_index >= ui->local_count) return;
+        sh = &ui->local[ui->edit_index];
+    }
+
+    lv_obj_t *panel = ui_modal_panel(app, 700, 340);
+    ui_label(panel, is_new ? "共享文件夹" : "共享设置", FONT_XL, PAL.text,
+             30, 22, 640, 34);
+    ui_label(panel, sh->name, FONT_MD, PAL.accent2, 30, 60, 640, 24);
+    lv_obj_t *path = ui_label(panel, sh->path, FONT_XS, PAL.text3, 30, 88, 640, 18);
+    lv_label_set_long_mode(path, LV_LABEL_LONG_DOT);
+    lv_obj_t *line = ui_rect(panel, 30, 116, 640, 1, 0, PAL.border);
+    lv_obj_set_style_bg_opa(line, 150, 0);
+
+    for (int i = 0; i < 2; i++) {
+        bool focus = ui->edit_focus == i;
+        lv_obj_t *row = ui_rect(panel, 30, 130 + i * 64, 640, 54, 12,
+                                focus ? PAL.accent : PAL.card);
+        lv_obj_set_style_bg_opa(row, focus ? 55 : 45, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        if (focus) ui_set_focus_ring(row, true, PAL.accent);
+        int lh = ui_text_height(FONT_MD);
+        if (i == 0) {
+            ui_label(row, "访问权限", FONT_MD, PAL.text, 18,
+                     (54 - lh) / 2, 300, lh);
+            lv_obj_t *v = ui_label(row, sh->writable ? "访客读写" : "访客只读",
+                                   FONT_SM, sh->writable ? PAL.warning : PAL.success,
+                                   380, (54 - lh) / 2, 240, lh);
+            lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
+        } else {
+            ui_label(row, is_new ? "创建共享" : "删除共享", FONT_MD,
+                     is_new ? PAL.accent2 : PAL.danger, 18,
+                     (54 - lh) / 2, 320, lh);
+        }
+        SmbShareCtx *ctx = xmalloc(sizeof(*ctx));
+        ctx->app = app;
+        ctx->index = i;
+        lv_obj_add_event_cb(row, smb_share_row_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(row, smb_share_ctx_free, LV_EVENT_DELETE, ctx);
+    }
+
+    char hintbuf[96];
+    ui_button_hint(app, hintbuf, sizeof(hintbuf), "{A} 确认 / {B} 关闭");
+    ui_label_center(panel, hintbuf, FONT_XS, PAL.text3, 0, 292, 700, 18);
+}
 
 /* ── Power menu ───────────────────────────────────────────────────────────── */
 
@@ -730,7 +1059,10 @@ void ui_build_modal_power(App *app)
         app->ui.power_buttons[app->ui.power_button_count++] = btn;
         y += bh + gap;
     }
-    ui_label_center(panel, "上下选择 / A 确认 / B 关闭", FONT_XS, PAL.text3,
+    char power_hint[64];
+    ui_button_hint(app, power_hint, sizeof(power_hint),
+                   "上下选择 / {A} 确认 / {B} 关闭");
+    ui_label_center(panel, power_hint, FONT_XS, PAL.text3,
                     0, 392, 460, 20);
     ui_update_power_focus(app);
 }

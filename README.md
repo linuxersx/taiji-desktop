@@ -30,7 +30,9 @@
 - 状态胶囊显示 Wi-Fi、蓝牙、电量百分比、充电状态、音量、时间和手柄连接
 - 状态栏保留一个椭圆形背景，按实际文字宽度自适应长度；内部的 Wi-Fi/蓝牙、电量、音量、时间、手柄图标可以逐个选择
 - 状态栏所有文字/符号使用同一字号，高度和垂直中心统一
-- 点击/触摸任意图标打开对应控制中心视图
+- 点击/触摸任意图标打开对应控制中心视图；点在图标之间的空隙也会打开最近的状态项
+- 焦点统一使用主题色焦点框（普通/导航/状态栏 4px，卡片/应用图标 5px），不再用状态栏底色高亮；焦点框不会挤动图标和文字
+- 顶部导航按上键不再进入状态栏，只有最右侧导航项按右才进入；状态栏按左到最左可回到导航栏
 - 无侧栏页面在首行按方向键上进入顶部导航；设置/商店/文件从左侧栏首项进入，右侧内容区到顶后停住
 - Linux Wi-Fi 使用 NetworkManager（`nmcli`）管理，蓝牙使用 BlueZ（`bluetoothctl`），均支持扫描、连接和开关
 - 文件页支持用系统默认程序打开文件；没有关联程序时提示“未安装可用的关联程序”
@@ -47,6 +49,9 @@
 - 应用列表监听 `.desktop`、pacman 日志和同步数据库变化，有变化才刷新，不再定时扫描
 - 删除 `.desktop` 或卸载应用后自动清理应用条目；手动添加的应用不受影响
 - 应用列表有新增/更新且不在应用页时，顶部“应用”导航右上角显示红点，进入应用页后清除
+- 应用商店卡片使用与桌面应用菜单一致的实心卡片底色，选中时显示焦点框
+- 商店长菜单改为滚动，不再为了塞下所有项而缩小界面；内置/外部界面共用这套滚动与滚动条样式
+- Flatpak 操作失败会给出可读原因（无网络或 DNS、权限、磁盘不足、应用或软件源不存在），不再只报退出码
 - 多任务概览返回时保留进入前的页面，不再强制回首页
 - 设置 → 显示 → 界面缩放：默认“自动”，手动可选 1.00 / 1.25 / 1.50 / 1.75 / 2.00 / 2.25 / 2.50 / 2.75 / 3.00
 - 自动缩放按屏幕高度靠近 720p 逻辑画布取档：720p 100%、900p 125%、1080p 150%、1440p/2K 200%
@@ -57,9 +62,8 @@
 - Wayland 是 SDDM 默认会话；双会话仍保留 X11 作为兼容后备
 - SDDM 虚拟键盘初始隐藏，点击/聚焦密码框时显示，登录失败后自动重新显示
 - 暗色深空主题、纸白主题、落日霓虹、森林复古四套配色
-- 主题支持“自动（深色/浅色）”：默认按日出/日落切换，深色映射深空蓝、浅色映射纸白
-- 显示设置可自定义自动深色/浅色时间；设置后不再按日落切换，留空恢复日出/日落
-- 自动日出日落默认使用上海坐标，可用 `TAIJI_LATITUDE` / `TAIJI_LONGITUDE` 覆盖
+- 主题支持“自动（深色/浅色）”：默认跟随本地时钟，19:00–07:00 深色、07:00–19:00 浅色，深色映射深空蓝、浅色映射纸白
+- 显示设置可自定义自动深色/浅色时间；留空恢复默认 19:00 / 07:00
 - 设置 → 系统 提供 28 个常用时区（含 UTC）供选择，选择后立即写入系统时区
 - 安装包内置 polkit 规则，允许本机活动会话直接修改时区和语言，不再弹出密码授权框
 - 设置 → 系统 可切换中文 / English；切换后会同步系统语言环境、太极界面和新启动的应用，重新登录后全部应用生效
@@ -75,8 +79,9 @@
 - 应用库：桌面式应用菜单，顶部应用分类（全部/游戏/影音/图形/办公/开发/网络/工具/系统/其他），下方可滚动图标网格
 - 应用列表支持上下左右导航，上方向键从第二行回到上一行，不再只向下/左右移动
 - Linux 下应用页每 10 秒自动扫描 `.desktop`，安装新应用后列表自动刷新
-- 肩键 L1/R1 切换顶部栏目；应用页用 L2/R2 切换分类。标签按手柄自动适配：
-  Xbox LB/RB + LT/RT、PlayStation L1/R1 + L2/R2、Switch L/R + ZL/ZR
+- 全界面按键提示按手柄自动适配：Xbox（A/B/X/Y、LB/RB、LT/RT）、PlayStation（×/○/□/△、L1/R1、L2/R2）、Switch（A/B/X/Y、L/R、ZL/ZR）；Start / Select / Guide 也按手柄显示
+- 肩键 L1/R1 切换顶部栏目；应用页用 L2/R2 切换分类
+- 文件页底栏只显示 A/B/X/Y 功能：Y 选中（标记）、X 打开工具菜单；侧栏里 X 打开菜单、Y 重新扫描位置
 - 自动扫描 Linux `.desktop`：读取 Name / Name[zh_CN] / Exec / Icon / Categories / NoDisplay / Hidden / TryExec
 - 自动按 `.desktop` 的 Categories 归类，图标自动从 hicolor/pixmaps/常见主题查找
 - SVG 图标在安装了 `rsvg-convert` 或 ImageMagick 时自动转为 PNG 缓存；否则回退文字图标
@@ -168,7 +173,8 @@ Debian / Ubuntu：
 sudo apt install \
   build-essential cmake pkg-config libsdl2-dev \
   sddm sway xwayland \
-  network-manager power-profiles-daemon pipewire wireplumber fonts-noto-cjk librsvg2-bin
+  network-manager power-profiles-daemon pipewire wireplumber fonts-noto-cjk librsvg2-bin \
+  samba avahi
 ```
 
 Wi-Fi 管理需要 NetworkManager 和 `nmcli`；蓝牙管理需要 BlueZ 的 `bluetooth` 服务与 `bluetoothctl`。性能模式优先使用 `power-profiles-daemon`（`powerprofilesctl`），
@@ -470,9 +476,11 @@ music    后台音乐
 
 文件页使用类似 Finder 的布局：左侧是位置栏，右侧是文件列表。
 
-- 左侧位置栏：个人收藏、根目录、U 盘/SD 卡、已挂载分区、SMB 共享
+- 左侧位置栏：个人收藏、根目录、U 盘/SD 卡、已挂载分区、SMB 共享，以及「连接」「管理」两个入口
 - 未挂载的可移动设备点击后通过 `udisksctl` 挂载，成功后自动进入
-- “连接服务器…”可添加电脑上的 SMB 共享文件夹
+- 「连接」右侧提供「扫描局域网」和「手动输入」：扫描本网段 445 端口并用 mDNS 补充发现，需要账号的服务器会提示输入用户名/密码
+- 「管理」列出本机共享和已连接的共享：新建共享、访客只读/读写、删除共享、启停共享服务
+- 工具菜单（X）里的「共享…」可直接对当前文件夹创建共享或修改权限
 - 右侧列表显示名称、修改日期、大小和种类
 - 多选时行尾点亮金色星标
 - 小屏自动收起左侧栏，按左键或工具栏按钮打开
@@ -485,6 +493,26 @@ music    后台音乐
 添加游戏目录、应用图标路径等需要填写路径的地方，按 Y/Start 或点“浏览目录 / 浏览文件”
 会直接在内嵌文件页中选择；选择完成后路径自动回填，再按 Enter 确认。
 选择期间顶部导航只保留“文件”可操作，其他栏目变灰并锁定，避免误切走。
+
+### 内置文本编辑器
+
+文件页的工具菜单和「打开方式…」都可以用内置编辑器打开文本文件。
+
+- 支持 `txt / md / markdown / rtf / html / htm / xml / json / yml / ini / conf / log / csv / sh / py / css / c / h / cpp` 等文本源码；RTF/HTML 按源码编辑
+- 上下左右 / 左摇杆移动光标，左右可跨行；没有焦点高亮条，只显示普通竖线光标
+- `A` 直接呼出屏幕键盘（不再弹编辑框），输入会插入到光标位置；键盘里的 Enter/退格/收起都直接生效
+- `Y` 退格、`X` 在光标处换行、`Start` 保存、`Select` 显示按键提示弹窗、`B` 返回
+- L1/R1 翻 10 行，L2/R2 跳到首行/末行
+- 保存使用临时文件 + rename，保留原文件权限和末尾换行；超过 4 MB 或 20000 行只载入前面部分，二进制文件拒绝打开
+
+### SMB 共享
+
+- 本机共享依赖 `samba`；共享服务默认关闭，在「管理」里按 `X` 开启
+- 每个共享默认**访客只读**，可在共享设置里切换访客读写
+- 共享配置写入 `/etc/samba/taiji-shares.conf`，由 `/etc/samba/smb.conf` 的 `include` 引入，不覆盖已有配置
+- 生成配置时会写入 `force user = <目录所有者>`，家目录（0700）下的文件夹也能被访客访问
+- 通过 `taiji-smb-helper` + polkit 规则免密管理，前端以普通用户运行，不需要输入密码
+- 局域网发现使用 mDNS，需要启用 `avahi-daemon`
 
 其他应用通过 **XDG Desktop Portal** 使用同一个选择器：
 
@@ -595,7 +623,7 @@ sudo apt install build-essential cmake pkg-config libsdl2-dev
 不会再下载 `base-devel` / `fakeroot`。生成的包在：
 
 ```text
-packaging/arch-bin/taiji-bin-1.0.0-165-aarch64.pkg.tar.zst
+packaging/arch-bin/taiji-bin-1.0.0-182-aarch64.pkg.tar.zst
 ```
 
 依赖由 `PKGBUILD` 声明，包括 SDL2、libpng、SDDM、sway、xorg-server、weston（登录界面）、
@@ -727,14 +755,18 @@ src/
     perf.c/h/gpu.c/h 性能与 GPU 模式
     desktop.c/h      桌面应用扫描
     hotkeyd.c/fbcap.c/osd.c  会话辅助进程
+    editor.c/h       内置文本编辑器模型
+    ui_editor.c      编辑器界面
 
   files/             文件管理器与内嵌文件页
     files_main.c     独立 taiji-files 入口
     files_ui.c       独立文件管理器界面
-    ui_files.c       主程序内嵌文件页
+    ui_files.c       主程序内嵌文件页（含连接/管理共享面板）
     files_fs.c       文件系统操作
     files_portal.c   XDG Desktop Portal
-    smb.c/h          SMB/GVFS
+    smb.c/h          SMB/GVFS 挂载
+    smb_share.c/h    局域网扫描、本机共享与 helper 调用
+    smb_helper.c     root 权限的共享配置 helper
     star_icon.c/h    收藏星标
 
   common/            主程序和文件管理器共用
@@ -742,7 +774,7 @@ src/
     catalog.c/h      平台目录与识别
     config.c/h       配置文件
     theme.c/h        字体与主题
-    theme_auto.c/h   日出日落/自定义自动主题
+    theme_auto.c/h   本地时钟/自定义自动主题
     i18n.c/h         中英文
     system_locale.c/h 系统时区与语言
     util.c/h         路径、字符串、UTF-8、缓存等工具

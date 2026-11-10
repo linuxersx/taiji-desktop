@@ -48,7 +48,10 @@ OSK_DAEMON="${ARMDECK_OSK_DAEMON:-/usr/bin/armdeck-oskd}"
 OSK_INPUT="${ARMDECK_OSK_INPUT:-/usr/bin/armdeck-osk-input}"
 if [ -x "$OSK_DAEMON" ] || [ -x "$OSK_INPUT" ]; then
     systemctl --user import-environment WAYLAND_DISPLAY XDG_SESSION_ID XDG_RUNTIME_DIR >/dev/null 2>&1 || true
-    if ! systemctl --user start armdeck-oskd.service armdeck-osk-input.service >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1; then
+    # Restart, not start: a service left over from a previous session may
+    # still have the old WAYLAND_DISPLAY/XDG_SESSION_ID and then cannot
+    # connect to Wayland (or looks at the wrong OSK socket).
+    if ! systemctl --user restart armdeck-oskd.service armdeck-osk-input.service >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1; then
         [ -x "$OSK_DAEMON" ] && "$OSK_DAEMON" >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1 &
         [ -x "$OSK_INPUT" ] && "$OSK_INPUT" >>"$LOG_DIR/armdeck-osk-daemon.log" 2>&1 &
     fi

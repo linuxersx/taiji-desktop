@@ -810,8 +810,9 @@ GameList library_query(Library *lib, const char *platform_id, SortMode sort,
     }
     g_sort_mode = sort;
     g_filter_mode = filter;
-    qsort(list.items, (size_t)list.count, sizeof(Game *), cmp_sort);
-    if (str_ieq(platform_id, "recent")) {
+    if (list.count > 1)
+        qsort(list.items, (size_t)list.count, sizeof(Game *), cmp_sort);
+    if (str_ieq(platform_id, "recent") && list.count > 1) {
         g_sort_mode = SORT_RECENT;
         qsort(list.items, (size_t)list.count, sizeof(Game *), cmp_sort);
     }

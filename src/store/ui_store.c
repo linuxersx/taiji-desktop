@@ -698,6 +698,7 @@ static void build_store_row(App *app, lv_obj_t *list, int idx, int y, int w, int
     int iy = (h - icon) / 2;
     if (p->icon[0] && access(p->icon, R_OK) == 0) {
         lv_obj_t *img = lv_image_create(row);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_pos(img, 10, iy);
         lv_obj_set_size(img, icon, icon);
@@ -982,10 +983,13 @@ static void build_store_card(App *app, lv_obj_t *parent, int idx,
     resolve_icon(app, p);
     bool sel = !app->store_on_sidebar && app->store_focus == idx;
     lv_obj_t *card = ui_rect(parent, x, y, w, h, 12, PAL.card);
-    lv_obj_set_style_bg_opa(card, sel ? 40 : 80, 0);
-    lv_obj_set_style_border_width(card, sel ? 2 : 1, 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(sel ? PAL.accent : PAL.border), 0);
-    lv_obj_set_style_border_opa(card, sel ? 220 : 60, 0);
+    /* Match the app menu cards: solid card colour plus a light 1px border.
+     * The old 80/255 translucent fill was nearly invisible on the light
+     * theme, where card and page background are both near-white. */
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(PAL.border), 0);
+    lv_obj_set_style_border_opa(card, PAL.is_light ? 120 : 80, 0);
+    lv_obj_set_style_clip_corner(card, true, 0);
     if (sel) ui_set_focus_ring(card, true, ui_focus_accent(idx));
     StoreCardCtx *cctx = xmalloc(sizeof(*cctx));
     cctx->app = app;
@@ -996,6 +1000,7 @@ static void build_store_card(App *app, lv_obj_t *parent, int idx,
     int icon = ui_clamp(h * 34 / 100, 26, 42);
     if (p->icon[0] && access(p->icon, R_OK) == 0) {
         lv_obj_t *img = lv_image_create(card);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_pos(img, ui_scale_x(10), ui_scale_y(10));
         lv_obj_set_size(img, ui_scale_x(icon), ui_scale_y(icon));
@@ -1097,6 +1102,16 @@ static void store_scroll_settled(lv_event_t *e)
     store_build_rows(first, last);
 }
 
+static void store_search_btn_cb(lv_event_t *e)
+{
+    app_input(lv_event_get_user_data(e), IN_X, NULL);
+}
+
+static void store_refresh_btn_cb(lv_event_t *e)
+{
+    app_input(lv_event_get_user_data(e), IN_Y, NULL);
+}
+
 void ui_build_store(App *app)
 {
     g_store_viewport = NULL;
@@ -1123,7 +1138,7 @@ void ui_build_store(App *app)
                              side_w, side_h, 14, PAL.card);
     lv_obj_set_style_bg_opa(side, 135, 0);
     lv_obj_set_scroll_dir(side, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(side, LV_SCROLLBAR_MODE_OFF);
+    ui_scrollbar_style(side);
     lv_obj_add_flag(side, LV_OBJ_FLAG_SCROLLABLE);
     int rh = L->rail_row_h;
     int sy = 4;
@@ -1149,12 +1164,31 @@ void ui_build_store(App *app)
     if (w < 80) w = 80;
     int store_title_h = ui_text_height(FONT_LG);
     int store_small_h = ui_text_height(FONT_XS);
+    /* The title uses the full header height, so the status/hint line below it
+     * was covered by the card viewport.  Reserve a row for that line. */
+    head_h += store_small_h + 4;
     ui_label(app->ui.root, "应用商店", FONT_LG, PAL.text, x, top, w / 2,
              store_title_h);
-    char count[128];
-    snprintf(count, sizeof(count), "%d 个应用", app->store_filter_count);
-    ui_label(app->ui.root, count, FONT_XS, PAL.text3, x + w / 2, top + 2,
-             w / 2, store_small_h);
+    int hb_y = top;
+    int hb_h = ui_clamp(store_title_h - 2, 26, 34);
+    lv_obj_t *rbtn = ui_rect(app->ui.root, x + w - 210, hb_y, 100, hb_h,
+                             hb_h / 2, PAL.card);
+    lv_obj_set_style_bg_opa(rbtn, 170, 0);
+    lv_obj_set_style_border_width(rbtn, 1, 0);
+    lv_obj_set_style_border_color(rbtn, lv_color_hex(PAL.border), 0);
+    lv_obj_add_flag(rbtn, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(rbtn, "刷新", FONT_XS, PAL.text2, 0,
+                    (hb_h - 16) / 2, 100, 18);
+    lv_obj_add_event_cb(rbtn, store_refresh_btn_cb, LV_EVENT_CLICKED, app);
+    lv_obj_t *sbtn = ui_rect(app->ui.root, x + w - 104, hb_y, 100, hb_h,
+                             hb_h / 2, PAL.card);
+    lv_obj_set_style_bg_opa(sbtn, 170, 0);
+    lv_obj_set_style_border_width(sbtn, 1, 0);
+    lv_obj_set_style_border_color(sbtn, lv_color_hex(PAL.accent2), 0);
+    lv_obj_add_flag(sbtn, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(sbtn, "搜索", FONT_XS, PAL.accent2, 0,
+                    (hb_h - 16) / 2, 100, 18);
+    lv_obj_add_event_cb(sbtn, store_search_btn_cb, LV_EVENT_CLICKED, app);
     int store_hint_y = top + store_title_h;
     if (!app->store_settings) {
         if (app->store_refreshing)
@@ -1166,9 +1200,12 @@ void ui_build_store(App *app)
         else if (app->store_search[0])
             ui_label(app->ui.root, app->store_search, FONT_XS, PAL.text2,
                      x, store_hint_y, w, store_small_h);
-        else
-            ui_label(app->ui.root, "按 X 搜索", FONT_XS, PAL.text3,
+        else {
+            char search_hint[64];
+            ui_button_hint(app, search_hint, sizeof(search_hint), "按 {X} 搜索");
+            ui_label(app->ui.root, search_hint, FONT_XS, PAL.text3,
                      x, store_hint_y, w, store_small_h);
+        }
     }
 
     if (app->store_settings) {
@@ -1181,7 +1218,7 @@ void ui_build_store(App *app)
         lv_obj_set_style_border_color(panel, lv_color_hex(PAL.border), 0);
         lv_obj_set_style_border_opa(panel, 80, 0);
         lv_obj_set_scroll_dir(panel, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+        ui_scrollbar_style(panel);
         lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
         int set_title_h = ui_text_height(FONT_MD);
@@ -1254,7 +1291,7 @@ void ui_build_store(App *app)
             lv_obj_set_style_border_opa(row, active ? 160 : 120, 0);
             if (focus) {
                 ui_set_focus_ring(row, true, PAL.accent);
-                lv_obj_scroll_to_view(row, LV_ANIM_ON);
+                ui_scroll_into_view(row, true);
             }
             int ny = rh >= 40 ? 6 : (rh - 16) / 2;
             int mirror_h = ui_text_height(FONT_SM);
@@ -1365,7 +1402,7 @@ void ui_build_store(App *app)
                                          viewport_h, 0, PAL.card);
             lv_obj_set_style_bg_opa(viewport, 0, 0);
             lv_obj_set_scroll_dir(viewport, LV_DIR_VER);
-            lv_obj_set_scrollbar_mode(viewport, LV_SCROLLBAR_MODE_AUTO);
+            ui_scrollbar_style(viewport);
             lv_obj_add_flag(viewport, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_t *content = ui_rect(viewport, 0, 0, w,
                                         content_h > viewport_h ? content_h
@@ -1378,8 +1415,7 @@ void ui_build_store(App *app)
                 StorePackage *p = &app->store_all.items[app->store_filter[0]];
                 resolve_icon(app, p);
                 lv_obj_t *hero = ui_rect(content, 0, 0, w, hero_h,
-                                         14, PAL.card_soft);
-                lv_obj_set_style_bg_opa(hero, 120, 0);
+                                         14, PAL.card);
                 lv_obj_set_style_border_width(hero, 1, 0);
                 lv_obj_set_style_border_color(hero,
                                               lv_color_hex(PAL.border_focus), 0);
@@ -1389,6 +1425,7 @@ void ui_build_store(App *app)
                 int icon = ui_clamp(hero_h * 42 / 100, 38, 58);
                 if (p->icon[0] && access(p->icon, R_OK) == 0) {
                     lv_obj_t *img = lv_image_create(hero);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
                     lv_obj_remove_style_all(img);
                     lv_obj_set_pos(img, ui_scale_x(14),
                                    ui_scale_y((hero_h - icon) / 2));
@@ -1423,7 +1460,9 @@ void ui_build_store(App *app)
                                             w - hx - 14, desc_h);
                     lv_label_set_long_mode(hd, LV_LABEL_LONG_DOT);
                 }
-                ui_label(hero, p->installed ? "已安装" : "A 查看安装",
+                char hero_hint[48];
+                ui_button_hint(app, hero_hint, sizeof(hero_hint), "{A} 查看安装");
+                ui_label(hero, p->installed ? "已安装" : hero_hint,
                          FONT_XS, p->installed ? PAL.success : PAL.text3,
                          hx, foot_y, w - hx - 14, 16);
             }
@@ -1509,9 +1548,11 @@ void ui_build_store(App *app)
                                20, desc_y, pw - 40,
                                ph - desc_y - 64 > 20 ? ph - desc_y - 64 : 20);
         lv_label_set_long_mode(d, LV_LABEL_LONG_WRAP);
-        const char *act = !p->removable ? "受保护" :
-                          p->update_available ? "A 更新" :
-                          (p->installed ? "A 卸载" : "A 安装");
+        char act_buf[48];
+        ui_button_hint(app, act_buf, sizeof(act_buf),
+                       p->update_available ? "{A} 更新" :
+                       (p->installed ? "{A} 卸载" : "{A} 安装"));
+        const char *act = !p->removable ? "受保护" : act_buf;
         lv_obj_t *actbtn = ui_rect(panel, 20, ph - 58, pw - 40, 28, 8, PAL.elevated);
         lv_obj_set_style_bg_opa(actbtn, 110, 0);
         if (p->removable) {
@@ -1527,7 +1568,9 @@ void ui_build_store(App *app)
         lv_obj_add_flag(backbtn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(backbtn, detail_back_clicked, LV_EVENT_CLICKED, app);
         int dback_h = ui_text_height(FONT_XS);
-        ui_label_center(backbtn, "B 返回", FONT_XS, PAL.text3, 0,
+        char back_hint[48];
+        ui_button_hint(app, back_hint, sizeof(back_hint), "{B} 返回");
+        ui_label_center(backbtn, back_hint, FONT_XS, PAL.text3, 0,
                         (20 - dback_h) / 2, 90, dback_h);
     }
 
@@ -1573,7 +1616,7 @@ void ui_build_store(App *app)
         lv_obj_set_style_bg_color(out, lv_color_hex(PAL.card_soft), 0);
         lv_obj_set_style_bg_opa(out, 120, 0);
         lv_obj_set_scroll_dir(out, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(out, LV_SCROLLBAR_MODE_AUTO);
+        ui_scrollbar_style(out);
         lv_obj_add_flag(out, LV_OBJ_FLAG_SCROLLABLE);
         pthread_mutex_lock(&g_store_lock);
         int out_n = app->store_task_output_count;
@@ -1596,7 +1639,9 @@ void ui_build_store(App *app)
             }
             lv_obj_scroll_to_y(out, 100000, LV_ANIM_OFF);
         }
-        lv_obj_t *cancel = ui_label(panel, "B 取消", FONT_XS, PAL.text3,
+        char cancel_hint[48];
+        ui_button_hint(app, cancel_hint, sizeof(cancel_hint), "{B} 取消");
+        lv_obj_t *cancel = ui_label(panel, cancel_hint, FONT_XS, PAL.text3,
                                     18, ph - 26, pw - 36, 16);
         lv_obj_set_style_text_align(cancel, LV_TEXT_ALIGN_LEFT, 0);
     }
@@ -1634,7 +1679,10 @@ void ui_build_store(App *app)
                                 sw - 48, ui_text_height(FONT_MD));
         lv_label_set_long_mode(ql, LV_LABEL_LONG_DOT);
         int hint_h = ui_text_height(FONT_XS);
-        ui_label(panel, "A 确认    B 取消    退格删除", FONT_XS, PAL.text3,
+        char edit_hint[96];
+        ui_button_hint(app, edit_hint, sizeof(edit_hint),
+                       "{A} 确认    {B} 取消    退格删除");
+        ui_label(panel, edit_hint, FONT_XS, PAL.text3,
                  14, sh - hint_h - 6, sw - 28, hint_h);
     }
 }

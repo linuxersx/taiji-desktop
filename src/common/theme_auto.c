@@ -95,11 +95,10 @@ bool theme_auto_is_dark(int dark_min, int light_min)
         return now >= dark || now < light;
     }
 
-    int sunrise = 360, sunset = 1080;
-    if (!theme_auto_sun_times(&sunrise, &sunset)) return false;
-    if (sunrise == sunset) return true;      /* 极夜，默认深色 */
-    if (sunrise < sunset)
-        return now < sunrise || now >= sunset;
-    /* 跨午夜：白昼为 [sunrise, 24) ∪ [0, sunset) */
-    return now >= sunset && now < sunrise;
+    /* Default to the hand-held's local wall clock.  Sunrise/sunset depends on
+     * a location, and many users leave the system clock in UTC; using Shanghai
+     * coordinates with a UTC clock incorrectly turns daytime into night. */
+    int dark = 19 * 60;
+    int light = 7 * 60;
+    return now >= dark || now < light;
 }

@@ -2,6 +2,7 @@ post_install() {
   if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=input || true
+    udevadm trigger --subsystem-match=backlight || true
   fi
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
@@ -11,6 +12,7 @@ post_install() {
   fi
   if command -v systemctl >/dev/null 2>&1; then
     systemctl reload systemd-logind >/dev/null 2>&1 || true
+    systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
   fi
 
   cat <<'MSG'

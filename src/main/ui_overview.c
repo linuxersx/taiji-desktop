@@ -22,14 +22,107 @@ static void overview_clicked(lv_event_t *e)
     OverviewCtx *ctx = lv_event_get_user_data(e);
     if (!ctx) return;
     App *app = ctx->app;
-    if (app->overview_focus != ctx->index) {
-        app->overview_focus = ctx->index;
-        app_rebuild(app);
-        audio_play(SND_NAV);
-        return;
-    }
+    /* Android-style: one tap on any task card opens it.  Defer the screen
+     * change until after LVGL's event dispatch so the card object is not
+     * deleted while its own CLICKED handler is running. */
     audio_play(SND_ENTER);
-    app_activate_task(app, ctx->index);
+    app->pending_overview_activate = ctx->index;
+}
+
+typedef struct {
+    App *app;
+    int index;
+} OverviewCloseCtx;
+
+static bool g_overview_closing = false;
+
+static void close_anim_exec(void *var, int32_t v)
+{
+    lv_obj_t *card = var;
+    int h = lv_obj_get_height(card);
+    int opa = 255 - 255 * v / 1000;
+    if (opa < 0) opa = 0;
+    lv_obj_set_style_translate_y(card, -((h + ui_scale_y(40)) * v / 1000), 0);
+    lv_obj_set_style_opa(card, (lv_opa_t)opa, 0);
+}
+
+static void close_anim_completed(lv_anim_t *a)
+{
+    OverviewCloseCtx *ctx = lv_anim_get_user_data(a);
+    if (!ctx || !ctx->app) return;
+    /* Do not rebuild the UI from inside an animation callback. Queue the
+     * close and let ui_tick() run it on the next frame. */
+    ctx->app->overview_close_pending = ctx->index;
+}
+
+static void close_anim_deleted(lv_anim_t *a)
+{
+    OverviewCloseCtx *ctx = lv_anim_get_user_data(a);
+    g_overview_closing = false;
+    free(ctx);
+}
+
+static void overview_close_animate(App *app, int index)
+{
+    lv_obj_t *card = app->ui.overview_main_card;
+    if (!card) return;
+    OverviewCloseCtx *ctx = xmalloc(sizeof(*ctx));
+    ctx->app = app;
+    ctx->index = index;
+    g_overview_closing = true;
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, card);
+    lv_anim_set_exec_cb(&a, close_anim_exec);
+    lv_anim_set_values(&a, 0, 1000);
+    lv_anim_set_duration(&a, 220);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
+    lv_anim_set_user_data(&a, ctx);
+    lv_anim_set_completed_cb(&a, close_anim_completed);
+    lv_anim_set_deleted_cb(&a, close_anim_deleted);
+    lv_anim_start(&a);
+}
+
+static void overview_background_clicked(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app) return;
+    audio_play(SND_BACK);
+    app->pending_overview_close = true;
+}
+
+static void overview_gesture(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (!app) return;
+    lv_indev_t *indev = lv_indev_active();
+    lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
+    /* A swipe must not turn into a click on release. */
+    if (indev) lv_indev_wait_release(indev);
+
+    int n = app->tasks.count;
+    if (n <= 0) return;
+    if (g_overview_closing || app->overview_close_pending >= 0) return;
+    if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+        if (n <= 1) return;
+        int focus = app->overview_focus + (dir == LV_DIR_LEFT ? 1 : -1);
+        focus = (focus + n) % n;
+        if (focus == app->overview_focus) return;
+        app->overview_slide_dir = (dir == LV_DIR_LEFT) ? 1 : -1;
+        app->pending_overview_focus = focus;
+        app->overview_kill_armed = false;
+        audio_play(SND_NAV);
+    } else if (dir == LV_DIR_TOP) {
+        int focus = app->overview_focus;
+        if (focus < 0 || focus >= n) return;
+        if (app->tasks.items[focus].kind == TASK_KIND_TAIJI) {
+            ui_toast(app, "不能关闭太极");
+            return;
+        }
+        audio_play(SND_BACK);
+        overview_close_animate(app, focus);
+    }
 }
 
 static const char *task_glyph(const TaskEntry *t)
@@ -43,6 +136,11 @@ static const char *task_glyph(const TaskEntry *t)
 static void fade_exec(void *var, int32_t v)
 {
     lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
+}
+
+static void slide_exec(void *var, int32_t v)
+{
+    lv_obj_set_style_translate_x((lv_obj_t *)var, v, 0);
 }
 
 static lv_obj_t *overview_card(App *app, lv_obj_t *parent, TaskEntry *t,
@@ -116,7 +214,9 @@ void ui_build_overview(App *app)
         lv_obj_t *panel = ui_rect(app->ui.root, px, py, pw, ph, 20, PAL.surface);
         lv_obj_set_style_bg_opa(panel, 220, 0);
         ui_label_center(panel, "没有可切换的任务", FONT_LG, PAL.text, 20, 30, pw - 40, 36);
-        ui_label_center(panel, "按 B 返回主界面", FONT_SM, PAL.text2, 20, 74, pw - 40, 28);
+        char back_hint[64];
+        ui_button_hint(app, back_hint, sizeof(back_hint), "按 {B} 返回主界面");
+        ui_label_center(panel, back_hint, FONT_SM, PAL.text2, 20, 74, pw - 40, 28);
         ui_footer_pill(app, "多任务", 0, "B 返回", "", "", "");
         return;
     }
@@ -130,6 +230,13 @@ void ui_build_overview(App *app)
     lv_obj_set_size(stage, ui_scale_x(L->w), ui_scale_y(L->h));
     lv_obj_remove_flag(stage, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(stage, 0, 0);
+    /* Tapping empty space acts like Android's back gesture. */
+    lv_obj_add_flag(stage, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(stage, overview_background_clicked, LV_EVENT_CLICKED, app);
+    /* Stop the default gesture bubbling at the stage, otherwise LVGL forwards
+     * the gesture to the screen and this handler never runs. */
+    lv_obj_remove_flag(stage, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(stage, overview_gesture, LV_EVENT_GESTURE, app);
     app->ui.overview_stage = stage;
 
     int content_w = L->w - L->pad * 2;
@@ -173,6 +280,7 @@ void ui_build_overview(App *app)
     lv_obj_t *main_card = overview_card(app, stage, &app->tasks.items[focus], focus,
                                         center_x, center_y, card_w, card_h,
                                         radius, true, 0);
+    app->ui.overview_main_card = main_card;
     if (app->ui.overview_card_count < 16)
         app->ui.overview_cards[app->ui.overview_card_count++] = main_card;
 
@@ -184,13 +292,37 @@ void ui_build_overview(App *app)
 
     ui_footer_pill(app, "多任务", total, "A 切换", "B 返回", "X 关闭", "");
     if (L->w < 500) {
-        ui_label(app->ui.root, "X 关闭任务", FONT_XS, PAL.text2,
+        char close_hint[40];
+        snprintf(close_hint, sizeof(close_hint), "%s 关闭任务",
+                 backend_button_west_label(&app->backend));
+        ui_label(app->ui.root, close_hint, FONT_XS, PAL.text2,
                  L->pad, L->footer_y - 24, 140, 20);
     }
 
+    int slide = app->overview_slide_dir;
+    app->overview_slide_dir = 0;
     bool animate = app->overview_animate;
     app->overview_animate = false;
-    if (animate && !app->config.reduce_motion) {
+    if (slide && !app->config.reduce_motion) {
+        int off = ui_scale_x(L->w * 35 / 100) * slide;
+        lv_obj_set_style_translate_x(stage, off, 0);
+        lv_obj_set_style_opa(stage, 0, 0);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, stage);
+        lv_anim_set_exec_cb(&a, slide_exec);
+        lv_anim_set_values(&a, off, 0);
+        lv_anim_set_duration(&a, 200);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_start(&a);
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, stage);
+        lv_anim_set_exec_cb(&a, fade_exec);
+        lv_anim_set_values(&a, 0, 255);
+        lv_anim_set_duration(&a, 180);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_start(&a);
+    } else if (animate && !app->config.reduce_motion) {
         lv_obj_set_style_opa(stage, 0, 0);
         lv_anim_t a;
         lv_anim_init(&a);

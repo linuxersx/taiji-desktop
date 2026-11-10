@@ -21,6 +21,7 @@ typedef struct {
 
     bool swap_ab;
     bool swap_xy;
+    bool swap_ps;
     bool custom_mapping;
     int map_confirm;
     int map_cancel;
@@ -60,5 +61,6 @@ void config_add_root(Config *c, const char *path);
 void config_remove_root(Config *c, int index);
 const char *config_command_for(const Config *c, const char *platform_id);
 void config_set_command(Config *c, const char *platform_id, const char *cmd);
+void config_remove_command(Config *c, const char *platform_id);
 
 #endif

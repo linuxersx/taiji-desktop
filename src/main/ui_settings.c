@@ -216,7 +216,7 @@ void ui_build_settings(App *app)
     lv_obj_set_style_border_color(rail, lv_color_hex(PAL.border), 0);
     lv_obj_set_style_pad_all(rail, 0, 0);
     lv_obj_set_scroll_dir(rail, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(rail, LV_SCROLLBAR_MODE_OFF);
+    ui_scrollbar_style(rail);
     lv_obj_add_flag(rail, LV_OBJ_FLAG_SCROLLABLE);
     app->ui.settings_rail_count = 0;
     int cats = app_settings_rail_count();
@@ -256,7 +256,7 @@ void ui_build_settings(App *app)
         lv_obj_add_event_cb(row, free_ctx, LV_EVENT_DELETE, ctx);
         app->ui.settings_rail_labels[app->ui.settings_rail_count] = lbl;
         app->ui.settings_rail[app->ui.settings_rail_count++] = row;
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_ON);
+        if (sel) ui_scroll_into_view(row, true);
     }
 
     /* Right detail panel */
@@ -309,7 +309,7 @@ void ui_build_settings(App *app)
         lv_obj_set_style_pad_all(body, 0, 0);
         lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
         lv_obj_set_scroll_dir(body, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
+        ui_scrollbar_style(body);
         lv_obj_add_flag(body, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(body, scroll_settled, LV_EVENT_SCROLL, NULL);
         lv_obj_add_event_cb(body, scroll_settled, LV_EVENT_SCROLL_END, NULL);
@@ -343,7 +343,7 @@ void ui_build_settings(App *app)
         lv_obj_set_style_pad_all(list, 0, 0);
         lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
         lv_obj_set_scroll_dir(list, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+        ui_scrollbar_style(list);
         lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(list, scroll_settled, LV_EVENT_SCROLL, NULL);
         lv_obj_add_event_cb(list, scroll_settled, LV_EVENT_SCROLL_END, NULL);
@@ -393,7 +393,7 @@ void ui_build_settings(App *app)
         lv_obj_update_layout(list);
         if (total > 0 && app->settings_row >= 0 &&
             app->settings_row < app->ui.settings_row_count) {
-            lv_obj_scroll_to_view(app->ui.settings_rows[app->settings_row], LV_ANIM_ON);
+            ui_scroll_into_view(app->ui.settings_rows[app->settings_row], true);
             lv_obj_invalidate(list);
             lv_obj_invalidate(lv_screen_active());
         }
@@ -410,9 +410,11 @@ void ui_build_settings(App *app)
     lv_obj_add_event_cb(back, back_clicked, LV_EVENT_CLICKED, app);
 
     int hint_w = L->w < 600 ? 170 : 300;
-    lv_obj_t *hint = ui_label(app->ui.root,
-                              L->w < 600 ? "上下 移动 / A 选择 / 左 返回"
-                                         : "上下 移动 / A 选择 / 左 返回 / B 返回",
+    char hintbuf[160];
+    ui_button_hint(app, hintbuf, sizeof(hintbuf),
+                   L->w < 600 ? "上下 移动 / {A} 选择 / 左 返回"
+                              : "上下 移动 / {A} 选择 / 左 返回 / {B} 返回");
+    lv_obj_t *hint = ui_label(app->ui.root, hintbuf,
                               FONT_XS, PAL.text2, L->w - L->pad - hint_w,
                               L->footer_y + (L->footer_h - 20) / 2,
                               hint_w, 22);
@@ -425,14 +427,16 @@ void ui_build_settings(App *app)
 void ui_update_settings(App *app)
 {
     if (app->ui.settings_hint_label) {
-        const char *hint;
+        char hintbuf[160];
         if (app->settings_on_rail)
-            hint = app->layout.w < 600 ? "上下 分类 / A 进入"
-                                       : "上下 分类 / A 或右 进入 / B 返回";
+            ui_button_hint(app, hintbuf, sizeof(hintbuf),
+                           app->layout.w < 600 ? "上下 分类 / {A} 进入"
+                                               : "上下 分类 / {A} 或右 进入 / {B} 返回");
         else
-            hint = app->layout.w < 600 ? "上下 移动 / A 选择 / 左 返回"
-                                       : "上下 移动 / A 选择 / 左 返回 / B 返回";
-        lv_label_set_text(app->ui.settings_hint_label, hint);
+            ui_button_hint(app, hintbuf, sizeof(hintbuf),
+                           app->layout.w < 600 ? "上下 移动 / {A} 选择 / 左 返回"
+                                               : "上下 移动 / {A} 选择 / 左 返回 / {B} 返回");
+        lv_label_set_text(app->ui.settings_hint_label, hintbuf);
     }
     for (int i = 0; i < app->ui.settings_rail_count; i++) {
         bool sel = app_settings_rail_cat(i) == app->settings_cat;
@@ -452,7 +456,7 @@ void ui_update_settings(App *app)
         lv_obj_set_style_bg_color(row, lv_color_hex(sel ? PAL.accent : PAL.card), 0);
         lv_obj_set_style_bg_opa(row, sel ? 58 : 70, 0);
         ui_set_focus_ring(row, sel, ui_focus_accent(app->settings_cat * 100 + i));
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_ON);
+        if (sel) ui_scroll_into_view(row, true);
     }
     lv_obj_invalidate(lv_screen_active());
 }

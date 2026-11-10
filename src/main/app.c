@@ -3,13 +3,17 @@
 #include <stdarg.h>
 #include "app.h"
 #include "external_osk.h"
+#include "editor.h"
+#include "smb_share.h"
 #include "catalog.h"
 #include "desktop.h"
 #include "desktop_watch.h"
 #include "theme.h"
 #include "i18n.h"
 #include "system_locale.h"
+#include "system_brightness.h"
 #include "theme_auto.h"
+#include "libretro.h"
 #include "util.h"
 
 #include <errno.h>
@@ -113,10 +117,13 @@ static const char *screen_collection(App *app)
 
 void app_apply_gamepad_config(App *app)
 {
+    /* Custom button mapping was removed from the UI; ignore and clear any
+     * legacy values so an old config cannot keep a hidden mapping active. */
+    app->config.custom_mapping = false;
+    app->config.map_confirm = app->config.map_cancel = -1;
+    app->config.map_menu1 = app->config.map_menu2 = -1;
     backend_configure_gamepad(app->config.swap_ab, app->config.swap_xy,
-                              app->config.custom_mapping,
-                              app->config.map_confirm, app->config.map_cancel,
-                              app->config.map_menu1, app->config.map_menu2);
+                              app->config.swap_ps, false, -1, -1, -1, -1);
 }
 
 void app_save_settings(App *app)
@@ -211,20 +218,34 @@ void app_set_language(App *app, int lang)
 
 void app_update_pad_labels(App *app)
 {
+    static int last_family = -2;
+    int family = app->backend.controller ? app->backend.controller_family : -1;
+    bool family_changed = family != last_family;
+    last_family = family;
+
     const char *l = backend_trigger_left_label(&app->backend);
     const char *r = backend_trigger_right_label(&app->backend);
-    if (strcmp(app->pad_left_label, l) == 0 && strcmp(app->pad_right_label, r) == 0) return;
+    bool labels_changed = strcmp(app->pad_left_label, l) != 0 ||
+                          strcmp(app->pad_right_label, r) != 0;
+    if (!family_changed && !labels_changed) return;
     snprintf(app->pad_left_label, sizeof(app->pad_left_label), "%s", l);
     snprintf(app->pad_right_label, sizeof(app->pad_right_label), "%s", r);
-    if (app->screen == SCREEN_APPS && app->modal == MODAL_NONE && !app->ui_suspended) {
-        app_rebuild(app);
+    if (app->modal == MODAL_GAMEPAD) {
+        ui_build_modal(app);
+        return;
     }
+    if (app->modal == MODAL_NONE && !app->ui_suspended)
+        app_rebuild(app);
 }
 
 void app_init(App *app)
 {
     memset(app, 0, sizeof(*app));
     app->ext_osk_fd = -1;
+    app->overview_close_pending = -1;
+    app->pending_input_action = 0;
+    app->pending_overview_focus = -1;
+    app->pending_overview_activate = -1;
     ui_set_external_osk_mode(external_osk_available());
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
@@ -421,8 +442,9 @@ int app_collections(App *app, Collection *out, int max)
         c->count = app->library.game_count;
         c->accent = PAL.accent;
         for (int i = 0; i < app->library.game_count; i++) {
-            if (app->library.games[i].cover_path[0]) {
-                snprintf(c->cover, sizeof(c->cover), "%s", app->library.games[i].cover_path);
+            const char *cp = app->library.games[i].cover_path;
+            if (cp && cp[0]) {
+                snprintf(c->cover, sizeof(c->cover), "%s", cp);
                 break;
             }
         }
@@ -438,7 +460,7 @@ int app_collections(App *app, Collection *out, int max)
         }
         if (g->favorite) {
             favs++;
-            if (!fav_cover && g->cover_path[0]) fav_cover = g->cover_path;
+            if (!fav_cover && g->cover_path && g->cover_path[0]) fav_cover = g->cover_path;
         }
     }
     if (recent > 0 && n < max) {
@@ -601,10 +623,174 @@ void app_set_app_category(App *app, const char *id)
 
 /* ── Launching ────────────────────────────────────────────────────────────── */
 
-void app_launch_game(App *app, Game *game)
+static int core_item_add(App *app, CoreItemKind kind, const char *label,
+                         const char *core, const char *path, bool compatible)
 {
-    Game *g = game;
-    if (!g) g = app_selected_game(app);
+    if (app->core_item_count >= 64) return -1;
+    CoreChoiceItem *it = &app->core_items[app->core_item_count];
+    memset(it, 0, sizeof(*it));
+    it->kind = kind;
+    snprintf(it->label, sizeof(it->label), "%s", label ? label : "");
+    if (core) snprintf(it->core, sizeof(it->core), "%s", core);
+    if (path) snprintf(it->path, sizeof(it->path), "%s", path);
+    it->compatible = compatible;
+    return app->core_item_count++;
+}
+
+static void command_core_name(const char *cmd, char *out, size_t out_size)
+{
+    out[0] = '\0';
+    char path[512];
+    if (!cmd || !*cmd || !libretro_command_core(cmd, path, sizeof(path))) return;
+    const char *base = path_basename(path);
+    size_t len = strlen(base);
+    static const char suffix[] = "_libretro.so";
+    size_t suffix_len = sizeof(suffix) - 1;
+    if (len > suffix_len && strcmp(base + len - suffix_len, suffix) == 0)
+        len -= suffix_len;
+    snprintf(out, out_size, "%.*s", (int)len, base);
+}
+
+static int core_find_name(App *app, const char *name)
+{
+    if (!name || !*name) return -1;
+    for (int i = 0; i < app->core_item_count; i++) {
+        if (app->core_items[i].kind == CORE_ITEM_CORE &&
+            strcmp(app->core_items[i].core, name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void core_items_build(App *app, bool all)
+{
+    app->core_item_count = 0;
+    app->core_picker_all = all;
+
+    LibretroCore cores[64];
+    if (all) {
+        int n = libretro_scan(cores, 64);
+        LibretroCore comp[64];
+        int nc = libretro_compatible(app->core_platform_id, comp, 64);
+        if (n == 0) {
+            core_item_add(app, CORE_ITEM_MANUAL, "手动输入命令…", NULL, NULL, false);
+            core_item_add(app, CORE_ITEM_BACK, "返回兼容核心列表", NULL, NULL, false);
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            bool compat = false;
+            bool rec = false;
+            for (int j = 0; j < nc; j++) {
+                if (strcmp(comp[j].name, cores[i].name) != 0) continue;
+                compat = true;
+                rec = comp[j].recommended;
+                break;
+            }
+            char label[160];
+            if (rec)
+                snprintf(label, sizeof(label), "%s（推荐）", cores[i].label);
+            else if (compat)
+                snprintf(label, sizeof(label), "%s（兼容）", cores[i].label);
+            else
+                snprintf(label, sizeof(label), "%s（未验证）", cores[i].label);
+            core_item_add(app, CORE_ITEM_CORE, label, cores[i].name,
+                          cores[i].path, compat);
+        }
+        core_item_add(app, CORE_ITEM_BACK, "返回兼容核心列表", NULL, NULL, false);
+        return;
+    }
+
+    int n = libretro_compatible(app->core_platform_id, cores, 64);
+    if (n == 0) {
+        core_item_add(app, CORE_ITEM_ALL, "选择其他核心…", NULL, NULL, false);
+        core_item_add(app, CORE_ITEM_MANUAL, "手动输入命令…", NULL, NULL, false);
+        return;
+    }
+
+    char label[192];
+    snprintf(label, sizeof(label), "自动（推荐：%s）", cores[0].label);
+    core_item_add(app, CORE_ITEM_AUTO, label, NULL, NULL, true);
+    for (int i = 0; i < n; i++) {
+        if (cores[i].recommended)
+            snprintf(label, sizeof(label), "%s（推荐）", cores[i].label);
+        else
+            snprintf(label, sizeof(label), "%s", cores[i].label);
+        core_item_add(app, CORE_ITEM_CORE, label, cores[i].name,
+                      cores[i].path, true);
+    }
+    core_item_add(app, CORE_ITEM_ALL, "全部已安装核心…", NULL, NULL, false);
+    if (!app->core_picker_launch)
+        core_item_add(app, CORE_ITEM_MANUAL, "手动输入命令…", NULL, NULL, false);
+}
+
+static int core_focus_for_current(App *app)
+{
+    const char *cmd = config_command_for(&app->config, app->core_platform_id);
+    char cur[64];
+    command_core_name(cmd, cur, sizeof(cur));
+    if (cur[0]) {
+        int idx = core_find_name(app, cur);
+        if (idx >= 0) return idx;
+    }
+    if (!app->core_picker_all) {
+        if (!cmd || !*cmd) {
+            for (int i = 0; i < app->core_item_count; i++)
+                if (app->core_items[i].kind == CORE_ITEM_AUTO) return i;
+        } else if (!cur[0]) {
+            for (int i = 0; i < app->core_item_count; i++)
+                if (app->core_items[i].kind == CORE_ITEM_MANUAL) return i;
+        }
+    }
+    for (int i = 0; i < app->core_item_count; i++)
+        if (app->core_items[i].kind == CORE_ITEM_CORE) return i;
+    return 0;
+}
+
+static void core_picker_set_title(App *app, const char *base)
+{
+    bool no_compat = !app->core_picker_all && app->core_item_count > 0 &&
+                     app->core_items[0].kind == CORE_ITEM_ALL;
+    snprintf(app->modal_title, sizeof(app->modal_title), "%s",
+             no_compat ? "未找到兼容核心" : base);
+}
+
+static void app_open_core_picker(App *app, const char *platform_id,
+                                 bool for_launch, const char *game_id)
+{
+    if (!platform_id || !*platform_id) return;
+    app->modal = MODAL_CHOICE;
+    app->choice_purpose = CHOICE_CORE;
+    snprintf(app->core_platform_id, sizeof(app->core_platform_id), "%s", platform_id);
+    app->core_picker_launch = for_launch && game_id && *game_id;
+    snprintf(app->core_pending_game_id, sizeof(app->core_pending_game_id), "%s",
+             app->core_picker_launch ? game_id : "");
+    /* Pick up cores installed since Taiji started. */
+    libretro_refresh();
+    core_items_build(app, false);
+    app->choice_focus = core_focus_for_current(app);
+    core_picker_set_title(app, "选择启动核心");
+    app->modal_hint[0] = '\0';
+    ui_build_modal(app);
+}
+
+static void core_picker_show_all(App *app)
+{
+    core_items_build(app, true);
+    app->choice_focus = core_focus_for_current(app);
+    snprintf(app->modal_title, sizeof(app->modal_title), "%s", "全部已安装核心");
+    ui_refresh_modal(app);
+}
+
+static void core_picker_show_compatible(App *app)
+{
+    core_items_build(app, false);
+    app->choice_focus = core_focus_for_current(app);
+    core_picker_set_title(app, "选择启动核心");
+    ui_refresh_modal(app);
+}
+
+static void app_launch_game_now(App *app, Game *g, const char *override_cmd)
+{
     if (!g) return;
     if (app->launcher.active) {
         if (app->launcher.external && app->launcher.game_session &&
@@ -623,8 +809,16 @@ void app_launch_game(App *app, Game *game)
     Platform *p = library_find_platform(&app->library, g->platform_id);
     char *error = NULL;
     bool session = launcher_session_available();
-    if (session) {
-        char *cmd = launcher_build_command(&app->config, p, g);
+    bool use_app_launcher = session || (override_cmd && *override_cmd);
+    if (use_app_launcher) {
+        char *cmd;
+        if (override_cmd && *override_cmd) {
+            Game tmp = *g;
+            tmp.command = (char *)override_cmd;
+            cmd = launcher_build_command(&app->config, p, &tmp);
+        } else {
+            cmd = launcher_build_command(&app->config, p, g);
+        }
         AppEntry tmp;
         memset(&tmp, 0, sizeof(tmp));
         snprintf(tmp.id, sizeof(tmp.id), "game:%s", g->id);
@@ -641,7 +835,7 @@ void app_launch_game(App *app, Game *game)
             return;
         }
         app->launcher.game_session = true;
-        app_set_ui_suspended(app, true);
+        if (session) app_set_ui_suspended(app, true);
     } else if (!launcher_start(&app->launcher, &app->config, p, g, &error)) {
         ui_toast(app, error ? error : "启动失败");
         free(error);
@@ -658,6 +852,75 @@ void app_launch_game(App *app, Game *game)
     snprintf(msg, sizeof(msg), "正在启动 %s", g->name);
     ui_toast(app, msg);
     if (!session) SDL_MinimizeWindow(app->backend.window);
+}
+
+void app_launch_game(App *app, Game *game)
+{
+    Game *g = game;
+    if (!g) g = app_selected_game(app);
+    if (!g) return;
+
+#ifndef __APPLE__
+    const char *saved_cmd = config_command_for(&app->config, g->platform_id);
+    bool stale_core = false;
+    if (saved_cmd && *saved_cmd) {
+        char core_path[512];
+        if (libretro_command_core(saved_cmd, core_path, sizeof(core_path))) {
+            if (!file_exists(core_path)) stale_core = true;
+        } else if (strstr(saved_cmd, "retroarch")) {
+            /* A bare "retroarch %ROM%" cannot work with dynamic cores. */
+            stale_core = true;
+        }
+    }
+    bool auto_no_core = false;
+    if (saved_cmd && !*saved_cmd) {
+        char *def = catalog_default_command(g->platform_id, false);
+        bool retroarch = def && (strncmp(def, "retroarch", 9) == 0 ||
+                                 strncmp(def, "xdg-open", 8) == 0);
+        free(def);
+        if (retroarch) {
+            LibretroCore probe[1];
+            auto_no_core = libretro_compatible(g->platform_id, probe, 1) == 0;
+        }
+    }
+    if (!app->launcher.active && (!g->command || !g->command[0]) &&
+        (!saved_cmd || stale_core || auto_no_core)) {
+        char *def = catalog_default_command(g->platform_id, false);
+        bool retroarch = def && strncmp(def, "retroarch", 9) == 0;
+        bool no_emulator = def && strncmp(def, "xdg-open", 8) == 0;
+        free(def);
+        if (stale_core && !retroarch && !no_emulator) {
+            /* The saved core disappeared, but a standalone emulator is now
+             * available. Drop the stale command and use the new default. */
+            config_remove_command(&app->config, g->platform_id);
+            config_save(&app->config);
+            app_launch_game_now(app, g, NULL);
+            return;
+        }
+        if (retroarch || no_emulator) {
+            LibretroCore cores[64];
+            int n = libretro_compatible(g->platform_id, cores, 64);
+            if (n == 1) {
+                char *quoted = shell_quote(cores[0].path);
+                char *cmd = xasprintf("retroarch -L %s %%ROM%%", quoted);
+                free(quoted);
+                if (stale_core) {
+                    config_set_command(&app->config, g->platform_id, cmd);
+                    config_save(&app->config);
+                }
+                app_launch_game_now(app, g, cmd);
+                free(cmd);
+            } else {
+                /* Zero compatible cores: explain and offer other cores/manual.
+                 * Several: let the user choose before the first launch. */
+                app_open_core_picker(app, g->platform_id, true, g->id);
+            }
+            return;
+        }
+    }
+#endif
+
+    app_launch_game_now(app, g, NULL);
 }
 
 void app_toggle_favorite(App *app, Game *game)
@@ -802,7 +1065,9 @@ static void launch_external_entry(App *app, AppEntry *entry)
 void app_launch_external(App *app)
 {
     if (app->apps.count == 0) {
-        ui_toast(app, "还没有应用，按 Y 添加");
+        char hint[64];
+        ui_button_hint(app, hint, sizeof(hint), "还没有应用，按 {Y} 添加");
+        ui_toast(app, hint);
         return;
     }
     AppEntry *entry = app_selected_entry(app);
@@ -1133,6 +1398,47 @@ static void volume_osd_send(int percent, bool muted)
 static void volume_osd_hide(void)
 {
     osd_send("hide");
+}
+
+static void brightness_osd_send(int percent)
+{
+    char msg[64];
+    snprintf(msg, sizeof(msg), "showb %d", percent);
+    if (osd_send(msg)) return;
+    if (!osd_spawn()) return;
+    for (int i = 0; i < 6; i++) {
+        usleep(80000);
+        if (osd_send(msg)) return;
+    }
+}
+
+void app_brightness_set(App *app, int percent)
+{
+    if (percent < 1) percent = 1;
+    if (percent > 100) percent = 100;
+    if (!system_brightness_set(percent)) {
+        ui_toast(app, "无法调节屏幕亮度");
+        return;
+    }
+    /* The panel usually has only a handful of brightness levels.  Report the
+     * value that was actually written, otherwise the OSD and the battery card
+     * show different percentages (for example target 50% -> hardware 57%). */
+    int actual = system_brightness_get();
+    if (actual >= 0) percent = actual;
+    brightness_osd_send(percent);
+    if (app->modal == MODAL_CONTROL &&
+        app->control_view == STATUS_BATTERY)
+        ui_update_brightness_modal(app);
+}
+
+void app_brightness_step(App *app, int delta)
+{
+    int current = system_brightness_get();
+    if (current < 0) {
+        ui_toast(app, "无法调节屏幕亮度");
+        return;
+    }
+    app_brightness_set(app, current + delta);
 }
 
 /* ── Managed task files ─────────────────────────────────────────────────── */
@@ -1879,6 +2185,8 @@ void app_close_modal(App *app)
         ui_fade_out_modal(app);
         return;
     }
+    app->core_pending_game_id[0] = '\0';
+    app->core_picker_launch = false;
     app->modal_closing = true;
     ui_set_input_active(false);
     ui_fade_out_modal(app);
@@ -1886,6 +2194,86 @@ void app_close_modal(App *app)
 
 void app_do_choice(App *app, int index, int value)
 {
+    if (app->choice_purpose == CHOICE_CORE) {
+        if (index < 0 || index >= app->core_item_count) return;
+        CoreChoiceItem item = app->core_items[index];
+        Platform *p = library_find_platform(&app->library, app->core_platform_id);
+        if (item.kind == CORE_ITEM_ALL) {
+            core_picker_show_all(app);
+            return;
+        }
+        if (item.kind == CORE_ITEM_BACK) {
+            core_picker_show_compatible(app);
+            return;
+        }
+        if (item.kind == CORE_ITEM_MANUAL) {
+            int pidx = -1;
+            for (int i = 0; i < app->library.platform_count; i++) {
+                if (strcmp(app->library.platforms[i].id, app->core_platform_id) == 0) {
+                    pidx = i;
+                    break;
+                }
+            }
+            if (pidx < 0) {
+                ui_toast(app, "找不到该平台");
+                return;
+            }
+            const char *cmd = config_command_for(&app->config, app->core_platform_id);
+            char buf[1024];
+            if (cmd && *cmd) {
+                snprintf(buf, sizeof(buf), "%s", cmd);
+            } else {
+#ifdef __APPLE__
+                char *def = catalog_default_command(app->core_platform_id, true);
+#else
+                char *def = catalog_default_command(app->core_platform_id, false);
+#endif
+                snprintf(buf, sizeof(buf), "%s", def ? def : "");
+                free(def);
+            }
+            app_open_text(app, TEXT_COMMAND, pidx, "编辑启动命令", buf,
+                          "使用 %ROM% 表示游戏路径，%NAME% 表示名称，%DIR% 表示目录。");
+            return;
+        }
+        if (item.kind == CORE_ITEM_AUTO || item.kind == CORE_ITEM_CORE) {
+            if (!p) {
+                app_close_modal(app);
+                return;
+            }
+            char pending[80];
+            snprintf(pending, sizeof(pending), "%s", app->core_pending_game_id);
+            bool launch = app->core_picker_launch && pending[0];
+            if (item.kind == CORE_ITEM_AUTO) {
+                /* Empty entry means "decided: use the automatic core", so the
+                 * first-launch picker does not appear again. */
+                config_set_command(&app->config, p->id, "");
+            } else {
+                char *quoted = shell_quote(item.path);
+                char *cmd = xasprintf("retroarch -L %s %%ROM%%", quoted);
+                free(quoted);
+                config_set_command(&app->config, p->id, cmd);
+                free(cmd);
+            }
+            app_save_settings(app);
+            app_close_modal(app);
+            if (launch) {
+                Game *g = library_find_game(&app->library, pending);
+                if (g) {
+                    app_launch_game_now(app, g, NULL);
+                    return;
+                }
+            }
+            app_rebuild(app);
+            if (item.kind == CORE_ITEM_AUTO)
+                ui_toast(app, "已使用自动推荐核心");
+            else if (item.compatible)
+                ui_toast(app, "已选择该核心");
+            else
+                ui_toast(app, "已选择未验证核心，可能无法运行此平台");
+            return;
+        }
+        return;
+    }
     (void)index;
     if (app->choice_purpose == CHOICE_THEME) {
         if (value >= theme_preset_count()) {
@@ -1938,8 +2326,17 @@ void app_do_choice(App *app, int index, int value)
         if (value == 0) app_files_extract_here(app);
         else if (value == 1) app_files_pick_extract_dir(app);
     } else if (app->choice_purpose == CHOICE_OPEN_WITH) {
-        int app_index = (value >= 0 && value < app->files_open_with_count) ?
-                        app->files_open_with_apps[value] : -1;
+        bool builtin = app->files_open_with_builtin;
+        if (builtin && value == 0) {
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "%s", app->files_open_with_path);
+            app_close_modal(app);
+            editor_open(app, path);
+            return;
+        }
+        int idx = builtin ? value - 1 : value;
+        int app_index = (idx >= 0 && idx < app->files_open_with_count) ?
+                        app->files_open_with_apps[idx] : -1;
         app_close_modal(app);
         if (app_index >= 0) app_files_open_with(app, app_index, false);
     } else if (app->choice_purpose == CHOICE_ARCHIVE_FORMAT) {
@@ -1990,7 +2387,7 @@ const char *app_settings_category_name(int cat, const char **subtitle)
     static const char *names[] = {"游戏库", "模拟器", "显示", "手柄", "应用", "系统", "关于"};
     static const char *subs[] = {
         "游戏目录与扫描工具", "每个平台的启动命令", "主题、网格与界面效果",
-        "按键映射与确认键布局", "应用启动、返回与后台策略",
+        "确认键、互换与手柄测试", "应用启动、返回与后台策略",
         "时区与系统语言", "版本、组件与操作说明"
     };
     if (cat < 0 || cat > 6) cat = 0;
@@ -2003,7 +2400,7 @@ int app_settings_page_size(int cat)
     if (cat == 0) return 8;
     if (cat == 1) return 7;
     if (cat == 2) return 14;
-    if (cat == 3) return 7;
+    if (cat == 3) return 6;
     if (cat == 4) return 8;
     return 0;
 }
@@ -2013,26 +2410,77 @@ void app_settings_rows(App *app, int *count)
     if (app->settings_cat == 0) *count = 8;
     else if (app->settings_cat == 1) *count = app->library.platform_count + 1;
     else if (app->settings_cat == 2) *count = 14;
-    else if (app->settings_cat == 3) *count = 7;
+    else if (app->settings_cat == 3) *count = 6;
     else if (app->settings_cat == 4) *count = 9;
     else if (app->settings_cat == 5) *count = 4;
     else *count = 0;
 }
 
-static const char *command_or_default(App *app, const char *platform_id, char *buf, size_t n)
+static const char *settings_core_status(App *app, const char *platform_id,
+                                        char *buf, size_t n)
 {
     const char *cmd = config_command_for(&app->config, platform_id);
-    if (!cmd || !*cmd) {
+    LibretroCore cores[64];
+    int nc = libretro_compatible(platform_id, cores, 64);
+
+    if (!cmd) {
 #ifdef __APPLE__
         char *def = catalog_default_command(platform_id, true);
+        bool retro = false;
+        bool none = false;
 #else
         char *def = catalog_default_command(platform_id, false);
+        bool retro = def && strncmp(def, "retroarch", 9) == 0;
+        bool none = def && strncmp(def, "xdg-open", 8) == 0;
 #endif
-        snprintf(buf, n, "默认 / %s", def);
+        if (retro || none) {
+            if (nc == 0)
+                snprintf(buf, n, "未找到兼容核心 / 可选其他核心");
+            else if (nc == 1)
+                snprintf(buf, n, "自动 / %s", cores[0].label);
+            else
+                snprintf(buf, n, "未选择 / 首次启动时选择");
+        } else if (def && *def) {
+            if (strlen(def) > 46)
+                snprintf(buf, n, "默认 / %.40s...", def);
+            else
+                snprintf(buf, n, "默认 / %s", def);
+        } else {
+            snprintf(buf, n, "未配置");
+        }
         free(def);
-    } else {
-        snprintf(buf, n, "%s", cmd);
+        return buf;
     }
+
+    if (!*cmd) {
+        if (nc > 0) snprintf(buf, n, "自动 / %s", cores[0].label);
+        else snprintf(buf, n, "未找到兼容核心 / 可选其他核心");
+        return buf;
+    }
+
+    char path[512];
+    if (libretro_command_core(cmd, path, sizeof(path))) {
+        const char *base = path_basename(path);
+        size_t len = strlen(base);
+        static const char suffix[] = "_libretro.so";
+        size_t suffix_len = sizeof(suffix) - 1;
+        if (len > suffix_len && strcmp(base + len - suffix_len, suffix) == 0)
+            len -= suffix_len;
+        char name[64];
+        snprintf(name, sizeof(name), "%.*s", (int)len, base);
+        char label[128];
+        libretro_label_for_name(name, label, sizeof(label));
+        if (!file_exists(path))
+            snprintf(buf, n, "核心失效 / %s", label);
+        else
+            snprintf(buf, n, "核心 / %s", label);
+        return buf;
+    }
+
+    if (strlen(cmd) > 46)
+        snprintf(buf, n, "自定义 / %.38s...", cmd);
+    else
+        snprintf(buf, n, "自定义 / %s", cmd);
     return buf;
 }
 
@@ -2074,19 +2522,9 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
         if (row < app->library.platform_count) {
             Platform *p = &app->library.platforms[row];
             snprintf(title, title_size, "%s  /  %s", catalog_zh_name(p->id), p->short_name);
-            char buf[500];
-            command_or_default(app, p->id, buf, sizeof(buf));
-            const char *app_marker = strstr(buf, "-a \"");
-            if (app_marker) {
-                const char *sname = app_marker + 4;
-                const char *e = strchr(sname, '"');
-                if (e) snprintf(value, value_size, "默认 / %.*s", (int)(e - sname), sname);
-                else snprintf(value, value_size, "%s", buf);
-            } else if (strlen(buf) > 46) {
-                snprintf(value, value_size, "%.43s...", buf);
-            } else {
-                snprintf(value, value_size, "%s", buf);
-            }
+            char buf[512];
+            settings_core_status(app, p->id, buf, sizeof(buf));
+            snprintf(value, value_size, "%s", buf);
             *kind = 1;
         } else if (row == app->library.platform_count) {
             snprintf(title, title_size, "恢复所有默认命令");
@@ -2115,7 +2553,14 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
             *kind = 3;
             return true;
         }
-        row -= 2;
+        if (row == 2) {
+            snprintf(title, title_size, "SDL 渲染器");
+            snprintf(value, value_size, "%s",
+                     renderer_display_name(app->renderer_name));
+            *kind = 1;
+            return true;
+        }
+        row -= 3;
         switch (row) {
             case 0: {
                 int max = app_ui_scale_max(app);
@@ -2152,14 +2597,12 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
             case 5: snprintf(title, title_size, "界面音效"); snprintf(value, value_size, "%s", app->config.sound ? "开启" : "关闭"); *kind = 2; break;
             case 6: snprintf(title, title_size, "界面音效音量"); snprintf(value, value_size, "%d%%", app->config.volume); *kind = 3; break;
             case 7: snprintf(title, title_size, "全屏显示"); snprintf(value, value_size, "%s", app->backend.fullscreen ? "开启" : "关闭"); *kind = 2; break;
-            case 8: snprintf(title, title_size, "SDL 渲染器"); snprintf(value, value_size, "%s",
-                             renderer_display_name(app->renderer_name)); *kind = 1; break;
-            case 9: snprintf(title, title_size, "低内存模式"); snprintf(value, value_size, "%s",
+            case 8: snprintf(title, title_size, "低内存模式"); snprintf(value, value_size, "%s",
                              app->config.low_power ? "开启" : "关闭"); *kind = 2; break;
-            case 10: {
+            case 9: {
                 snprintf(title, title_size, "自动深色时间");
                 if (app->config.auto_dark_min < 0) {
-                    snprintf(value, value_size, "日落（自动）");
+                    snprintf(value, value_size, "19:00（自动）");
                 } else {
                     int m = app->config.auto_dark_min;
                     snprintf(value, value_size, "%02d:%02d", m / 60, m % 60);
@@ -2167,10 +2610,10 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
                 *kind = 1;
                 break;
             }
-            case 11: {
+            case 10: {
                 snprintf(title, title_size, "自动浅色时间");
                 if (app->config.auto_light_min < 0) {
-                    snprintf(value, value_size, "日出（自动）");
+                    snprintf(value, value_size, "07:00（自动）");
                 } else {
                     int m = app->config.auto_light_min;
                     snprintf(value, value_size, "%02d:%02d", m / 60, m % 60);
@@ -2196,11 +2639,17 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
                 snprintf(value, value_size, "%d 个", app->apps.count); break;
             case 4: snprintf(title, title_size, "当前会话");
                 snprintf(value, value_size, "%s", session && *session ? session : "桌面"); break;
-            case 5: snprintf(title, title_size, "XWayland");
+            case 5: {
+                const char *display = getenv("DISPLAY");
+                snprintf(title, title_size, "XWayland");
                 snprintf(value, value_size, "%s",
-                         getenv("DISPLAY") && *getenv("DISPLAY") ? "可用" : "不可用"); break;
+                         display && *display ? "可用" : "不可用");
+            } break;
             case 6: snprintf(title, title_size, "返回键");
-                snprintf(value, value_size, "Guide / Home"); break;
+                snprintf(value, value_size, "%s",
+                         app->backend.controller ?
+                         backend_guide_label(&app->backend) : "Guide / Home");
+                break;
             case 7: snprintf(title, title_size, "管理应用");
                 snprintf(value, value_size, "打开应用库"); *kind = 1; break;
             case 8: snprintf(title, title_size, "扫描桌面应用");
@@ -2247,10 +2696,9 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
             } break;
             case 1: snprintf(title, title_size, "A / B 互换"); snprintf(value, value_size, "%s", app->config.swap_ab ? "任天堂式" : "标准"); *kind = 2; break;
             case 2: snprintf(title, title_size, "X / Y 互换"); snprintf(value, value_size, "%s", app->config.swap_xy ? "已互换" : "标准"); *kind = 2; break;
-            case 3: snprintf(title, title_size, "自定义按键映射"); snprintf(value, value_size, "%s", app->config.custom_mapping ? "开启" : "关闭"); *kind = 2; break;
-            case 4: snprintf(title, title_size, "手动映射按键"); value[0] = '\0'; *kind = 1; break;
-            case 5: snprintf(title, title_size, "恢复默认按键"); value[0] = '\0'; *kind = 1; break;
-            case 6: snprintf(title, title_size, "手柄按键检测"); value[0] = '\0'; *kind = 1; break;
+            case 3: snprintf(title, title_size, "PS × / ○ 互换"); snprintf(value, value_size, "%s", app->config.swap_ps ? "已互换" : "标准"); *kind = 2; break;
+            case 4: snprintf(title, title_size, "恢复默认按键"); value[0] = '\0'; *kind = 1; break;
+            case 5: snprintf(title, title_size, "手柄按键检测"); value[0] = '\0'; *kind = 1; break;
             default: return false;
         }
         return true;
@@ -2302,26 +2750,31 @@ void app_settings_activate(App *app, int row)
             app_save_settings(app);
             app_rebuild(app);
         } else {
-            ui_toast(app, "使用方向键浏览，A 执行操作");
+            char hint[64];
+            ui_button_hint(app, hint, sizeof(hint),
+                           "使用方向键浏览，{A} 执行操作");
+            ui_toast(app, hint);
         }
         return;
     }
     if (app->settings_cat == 1) {
         if (row < app->library.platform_count) {
             Platform *p = &app->library.platforms[row];
-            char buf[1024];
-            const char *cmd = config_command_for(&app->config, p->id);
-            if (!cmd || !*cmd) {
 #ifdef __APPLE__
+            const char *cmd = config_command_for(&app->config, p->id);
+            char buf[1024];
+            if (cmd && *cmd) {
+                snprintf(buf, sizeof(buf), "%s", cmd);
+            } else {
                 char *def = catalog_default_command(p->id, true);
-#else
-                char *def = catalog_default_command(p->id, false);
-#endif
-                snprintf(buf, sizeof(buf), "%s", def);
+                snprintf(buf, sizeof(buf), "%s", def ? def : "");
                 free(def);
-            } else snprintf(buf, sizeof(buf), "%s", cmd);
+            }
             app_open_text(app, TEXT_COMMAND, row, "编辑启动命令", buf,
                           "使用 %ROM% 表示游戏路径，%NAME% 表示名称，%DIR% 表示目录。");
+#else
+            app_open_core_picker(app, p->id, false, NULL);
+#endif
         } else {
             for (int i = 0; i < app->config.command_count; i++) {
                 free(app->config.commands[i].platform_id);
@@ -2339,7 +2792,11 @@ void app_settings_activate(App *app, int row)
     if (app->settings_cat == 2) {
         if (row == 0) { app_cycle_refresh(app, 1); return; }
         if (row == 1) { app_cycle_render_scale(app, 1); return; }
-        row -= 2;
+        if (row == 2) {
+            app_open_choice(app, CHOICE_RENDERER, "SDL 渲染器（重启后生效）");
+            return;
+        }
+        row -= 3;
         if (row == 0) app_open_choice(app, CHOICE_UI_SCALE, "界面缩放");
         else if (row == 1) app_open_choice(app, CHOICE_THEME, "选择主题");
         else if (row == 2) app_open_choice(app, CHOICE_COLUMNS, "游戏网格列数");
@@ -2348,17 +2805,16 @@ void app_settings_activate(App *app, int row)
         else if (row == 5) { app->config.sound = !app->config.sound; app_save_settings(app); app_rebuild(app); }
         else if (row == 6) { app->config.volume = (app->config.volume + 10) % 110; audio_set_volume(app->config.volume); app_save_settings(app); app_rebuild(app); }
         else if (row == 7) { backend_toggle_fullscreen(&app->backend); app_rebuild(app); }
-        else if (row == 8) app_open_choice(app, CHOICE_RENDERER, "SDL 渲染器（重启后生效）");
-        else if (row == 9) { app->config.low_power = !app->config.low_power; app_save_settings(app); app_rebuild(app); }
-        else if (row == 10 || row == 11) {
-            bool dark = row == 10;
+        else if (row == 8) { app->config.low_power = !app->config.low_power; app_save_settings(app); app_rebuild(app); }
+        else if (row == 9 || row == 10) {
+            bool dark = row == 9;
             int minutes = dark ? app->config.auto_dark_min : app->config.auto_light_min;
             char cur[16] = "";
             if (minutes >= 0)
                 snprintf(cur, sizeof(cur), "%02d:%02d", minutes / 60, minutes % 60);
             app_open_text(app, dark ? TEXT_AUTO_DARK : TEXT_AUTO_LIGHT, 0,
                           dark ? "自动深色时间" : "自动浅色时间", cur,
-                          "输入 HH:MM，例如 20:00；留空恢复按日落/日出切换。");
+                          "输入 HH:MM，例如 20:00；留空恢复默认 19:00 / 07:00。");
         }
         return;
     }
@@ -2399,35 +2855,17 @@ void app_settings_activate(App *app, int row)
     if (app->settings_cat == 3) {
         if (row == 1) { app->config.swap_ab = !app->config.swap_ab; app_save_settings(app); app_rebuild(app); }
         else if (row == 2) { app->config.swap_xy = !app->config.swap_xy; app_save_settings(app); app_rebuild(app); }
-        else if (row == 3) {
-            app->config.custom_mapping = !app->config.custom_mapping;
-            app_save_settings(app);
-            app_rebuild(app);
-            if (app->config.custom_mapping && app->config.map_confirm < 0) {
-                app->modal = MODAL_MAPPING;
-                app->mapping_step = 0;
-                backend_set_capture(true);
-                ui_build_modal(app);
-            }
-        }
+        else if (row == 3) { app->config.swap_ps = !app->config.swap_ps; app_save_settings(app); app_rebuild(app); }
         else if (row == 4) {
-            app->modal = MODAL_MAPPING;
-            app->mapping_step = 0;
-            app->mapping_values[0] = app->config.map_confirm;
-            app->mapping_values[1] = app->config.map_cancel;
-            app->mapping_values[2] = app->config.map_menu1;
-            app->mapping_values[3] = app->config.map_menu2;
-            backend_set_capture(true);
-            ui_build_modal(app);
-        } else if (row == 5) {
             app->config.custom_mapping = false;
             app->config.map_confirm = app->config.map_cancel = -1;
             app->config.map_menu1 = app->config.map_menu2 = -1;
             app->config.swap_ab = app->config.swap_xy = false;
+            app->config.swap_ps = false;
             app_save_settings(app);
             app_rebuild(app);
             ui_toast(app, "已恢复默认按键");
-        } else if (row == 6) {
+        } else if (row == 5) {
             app->modal = MODAL_GAMEPAD;
             ui_build_modal(app);
         }
@@ -2443,7 +2881,7 @@ void app_settings_adjust(App *app, int row, int dir)
     if (app->settings_cat == 2) {
         if (row == 0) { app_cycle_refresh(app, dir); return; }
         if (row == 1) { app_cycle_render_scale(app, dir); return; }
-        row -= 2;
+        row -= 3;
     }
     if (app->settings_cat == 5 && row == 1) {
         app_set_language(app, app->config.language == 1 ? 0 : 1);
@@ -2454,10 +2892,10 @@ void app_settings_adjust(App *app, int row, int dir)
         else if (app->settings_cat == 2 && row == 4) app->config.reduce_motion = !app->config.reduce_motion;
         else if (app->settings_cat == 2 && row == 5) app->config.sound = !app->config.sound;
         else if (app->settings_cat == 2 && row == 7) { backend_toggle_fullscreen(&app->backend); app_rebuild(app); return; }
-        else if (app->settings_cat == 2 && row == 9) { app->config.low_power = !app->config.low_power; app_save_settings(app); app_rebuild(app); return; }
+        else if (app->settings_cat == 2 && row == 8) { app->config.low_power = !app->config.low_power; app_save_settings(app); app_rebuild(app); return; }
         else if (app->settings_cat == 3 && row == 1) app->config.swap_ab = !app->config.swap_ab;
         else if (app->settings_cat == 3 && row == 2) app->config.swap_xy = !app->config.swap_xy;
-        else if (app->settings_cat == 3 && row == 3) app->config.custom_mapping = !app->config.custom_mapping;
+        else if (app->settings_cat == 3 && row == 3) app->config.swap_ps = !app->config.swap_ps;
         app_save_settings(app);
         app_rebuild(app);
         return;
@@ -2575,8 +3013,14 @@ void app_menu_labels(App *app, const char **labels, MenuAction *actions, int *co
         FsEntry *sel = has_sel ? &app->files_list.items[app->files_focus] : NULL;
         bool is_dir = sel && sel->is_dir;
         bool is_archive = sel && !sel->is_dir && files_is_archive(sel->name);
+        char fav_path[PATH_MAX];
+        bool has_fav_path = app_files_favorite_path(app, fav_path, sizeof(fav_path));
+        bool is_fav = has_fav_path && app_files_favorite_contains(fav_path);
+        bool fav_current = !app->files_on_sidebar && (!sel || !is_dir);
 
-        labels[n] = "新建文件夹"; actions[n++] = MENU_FILE_NEW;
+        labels[n] = is_fav ? (fav_current ? "取消收藏当前文件夹" : "从收藏移除")
+                           : (fav_current ? "收藏当前文件夹" : "添加到收藏");
+        actions[n++] = MENU_FILE_FAVORITE;
         if (sel && !is_dir) {
             labels[n] = "打开"; actions[n++] = MENU_FILE_OPEN;
             labels[n] = "打开方式..."; actions[n++] = MENU_FILE_OPEN_WITH;
@@ -2594,6 +3038,11 @@ void app_menu_labels(App *app, const char **labels, MenuAction *actions, int *co
         if (sel) {
             labels[n] = "移到回收站"; actions[n++] = MENU_FILE_TRASH;
             labels[n] = "永久删除"; actions[n++] = MENU_FILE_DELETE;
+        }
+        labels[n] = "新建文件夹"; actions[n++] = MENU_FILE_NEW;
+        labels[n] = "新建文本文件"; actions[n++] = MENU_FILE_NEW_TEXT;
+        labels[n] = "共享…"; actions[n++] = MENU_FILE_SHARE;
+        if (sel) {
             labels[n] = "属性"; actions[n++] = MENU_FILE_PROPERTIES;
         }
     } else {
@@ -2816,6 +3265,20 @@ static bool parse_hhmm(const char *s, int *out)
 
 static void finish_text(App *app)
 {
+    if (app->text_purpose == TEXT_EDITOR_LINE) {
+        int idx = app->modal_arg;
+        editor_set_line(app, idx, app->input_buf);
+        app->editor.focus = idx;
+        app->editor.col = (int)strlen(app->input_buf);
+        app->editor.want_col = app->editor.col;
+        app->modal = MODAL_NONE;
+        app->modal_closing = false;
+        ui_set_input_active(false);
+        ui_close_modal_visual(app);
+        app_rebuild(app);
+        editor_edit_line(app, idx + 1);
+        return;
+    }
     if (app->text_purpose == TEXT_ROOT) {
         char *abs = path_absolute(app->input_buf);
         if (!dir_exists(abs)) {
@@ -2836,13 +3299,30 @@ static void finish_text(App *app)
                app->text_purpose <= TEXT_SMB_PASS) {
         app_files_smb_text_done(app);
         return;
+    } else if (app->text_purpose == TEXT_SMB_SHARE_PATH ||
+               app->text_purpose == TEXT_SMB_SHARE_NAME) {
+        app_files_share_text_done(app);
+        return;
+    } else if (app->text_purpose == TEXT_SMB_AUTH_USER ||
+               app->text_purpose == TEXT_SMB_AUTH_PASS) {
+        app_files_smb_auth_done(app);
+        return;
     } else if (app->text_purpose == TEXT_COMMAND) {
+        char pending[80];
+        snprintf(pending, sizeof(pending), "%s", app->core_pending_game_id);
         if (app->modal_arg >= 0 && app->modal_arg < app->library.platform_count) {
             Platform *p = &app->library.platforms[app->modal_arg];
             config_set_command(&app->config, p->id, app->input_buf);
             app_save_settings(app);
             app_close_modal(app);
             app_rebuild(app);
+            if (pending[0]) {
+                Game *g = library_find_game(&app->library, pending);
+                if (g) {
+                    app_launch_game_now(app, g, NULL);
+                    return;
+                }
+            }
             ui_toast(app, "启动命令已保存");
         } else app_close_modal(app);
     } else if (app->text_purpose == TEXT_GAME_COMMAND) {
@@ -2907,7 +3387,7 @@ static void finish_text(App *app)
         app_apply_theme(app, false);
         app_rebuild(app);
         ui_toast(app, app->config.auto_dark_min < 0 ?
-                        "已恢复按日落/日出切换" : "自动切换时间已保存");
+                        "已恢复默认 19:00 / 07:00" : "自动切换时间已保存");
     } else if (app->text_purpose == TEXT_APP_NAME ||
                app->text_purpose == TEXT_APP_COMMAND ||
                app->text_purpose == TEXT_APP_ICON) {
@@ -2954,6 +3434,10 @@ static void run_confirm(App *app)
     }
     if (app->confirm_purpose == CONFIRM_RESCAN) {
         app_rescan(app);
+        return;
+    }
+    if (app->confirm_purpose == CONFIRM_EDITOR_DISCARD) {
+        editor_leave(app);
         return;
     }
     if (app->confirm_purpose == CONFIRM_RESET_MAP) {
@@ -3041,12 +3525,29 @@ static void modal_text_input(App *app, InputAction action, const char *text)
 {
     if (action == IN_TEXT && text) { text_append(app, text); ui_refresh_modal(app); return; }
     if (action == IN_BACKSPACE) { utf8_pop(app->input_buf); app->input_cursor = (int)strlen(app->input_buf); ui_refresh_modal(app); return; }
-    if ((action == IN_Y || action == IN_START) && app_files_pick_supported(app)) {
+    if ((action == IN_Y || action == IN_START) &&
+        app->text_purpose != TEXT_EDITOR_LINE && app_files_pick_supported(app)) {
         app_files_pick_start(app);
         return;
     }
     if (action == IN_CONFIRM) { finish_text(app); return; }
-    if (action == IN_CANCEL) { app_close_modal(app); return; }
+    if (action == IN_CANCEL) {
+        if (app->text_purpose == TEXT_EDITOR_LINE) {
+            editor_set_line(app, app->modal_arg, app->input_buf);
+            app->editor.focus = app->modal_arg;
+            app->editor.col = (int)strlen(app->input_buf);
+            app->editor.want_col = app->editor.col;
+            external_osk_hide(app);
+            app->modal = MODAL_NONE;
+            app->modal_closing = false;
+            ui_set_input_active(false);
+            ui_close_modal_visual(app);
+            app_rebuild(app);
+            return;
+        }
+        app_close_modal(app);
+        return;
+    }
 }
 
 static void modal_search_input(App *app, InputAction action, const char *text)
@@ -3224,8 +3725,9 @@ static void modal_input(App *app, InputAction action, const char *text)
             values[0] = 0;
             values[1] = 1;
         } else if (app->choice_purpose == CHOICE_OPEN_WITH) {
-            n = app->files_open_with_count;
-            for (int i = 0; i < n && i < 64; i++) values[i] = i;
+            n = app->files_open_with_count + (app->files_open_with_builtin ? 1 : 0);
+            if (n > 64) n = 64;
+            for (int i = 0; i < n; i++) values[i] = i;
         } else if (app->choice_purpose == CHOICE_ARCHIVE_FORMAT) {
             n = 3;
             for (int i = 0; i < n; i++) values[i] = i;
@@ -3236,6 +3738,11 @@ static void modal_input(App *app, InputAction action, const char *text)
         } else if (app->choice_purpose == CHOICE_UI_SCALE) {
             int max = app_ui_scale_max(app);
             n = app_ui_scale_values(values, 16, max);
+        } else if (app->choice_purpose == CHOICE_CORE) {
+            n = app->core_item_count;
+            if (n < 1) n = 1;
+            if (n > 64) n = 64;
+            for (int i = 0; i < n; i++) values[i] = i;
         } else {
             n = 4;
             for (int i = 0; i < n; i++) values[i] = i;
@@ -3252,7 +3759,12 @@ static void modal_input(App *app, InputAction action, const char *text)
         if (action == IN_UP) { app->choice_focus = (app->choice_focus - 1 + n) % n; ui_refresh_modal(app); }
         else if (action == IN_DOWN) { app->choice_focus = (app->choice_focus + 1) % n; ui_refresh_modal(app); }
         else if (action == IN_CONFIRM) app_do_choice(app, app->choice_focus, values[app->choice_focus]);
-        else if (action == IN_CANCEL) app_close_modal(app);
+        else if (action == IN_CANCEL) {
+            if (app->choice_purpose == CHOICE_CORE && app->core_picker_all)
+                core_picker_show_compatible(app);
+            else
+                app_close_modal(app);
+        }
         return;
     }
     if (app->modal == MODAL_MENU) {
@@ -3311,6 +3823,67 @@ static void modal_input(App *app, InputAction action, const char *text)
         else if (action == IN_DOWN && app->ui.modal_scroll)
             lv_obj_scroll_by(app->ui.modal_scroll, 0, -40, LV_ANIM_OFF);
         else if (action == IN_CANCEL || action == IN_CONFIRM)
+            app_close_modal(app);
+        return;
+    }
+    if (app->modal == MODAL_SMB_SHARE) {
+        SmbUi *ui = &app->smb_ui;
+        if (action == IN_UP || action == IN_DOWN) {
+            ui->edit_focus = ui->edit_focus ? 0 : 1;
+            ui_refresh_modal(app);
+        }
+        else if (action == IN_CONFIRM || action == IN_A) {
+            if (ui->edit_index < 0) {
+                if (ui->edit_focus == 0) {
+                    ui->pending_writable = !ui->pending_writable;
+                    ui_refresh_modal(app);
+                } else {
+                    const char *base = strrchr(ui->pending_path, '/');
+                    base = base ? base + 1 : ui->pending_path;
+                    char name[96];
+                    snprintf(name, sizeof(name), "%s", *base ? base : "share");
+                    char err[192] = "";
+                    if (smb_local_add(app, name, ui->pending_path,
+                                      ui->pending_writable, err, sizeof(err))) {
+                        ui->edit_index = -1;
+                        app_close_modal(app);
+                        app_rebuild(app);
+                        ui_toast(app, "共享已创建，可在「管理」中开启服务");
+                    } else {
+                        ui_toast(app, err[0] ? err : "创建共享失败");
+                    }
+                }
+                return;
+            }
+            if (ui->edit_index >= 0 && ui->edit_index < ui->local_count) {
+                SmbLocalShare *sh = &ui->local[ui->edit_index];
+                char err[192] = "";
+                if (ui->edit_focus == 0) {
+                    bool next = !sh->writable;
+                    if (smb_local_set(app, sh->name, sh->path, next, err, sizeof(err)))
+                        ui_toast(app, next ? "已设为访客读写" : "已设为访客只读");
+                    else
+                        ui_toast(app, err[0] ? err : "保存共享设置失败");
+                    ui_refresh_modal(app);
+                } else {
+                    if (smb_local_remove(app, sh->name, err, sizeof(err))) {
+                        ui->edit_index = -1;
+                        app_close_modal(app);
+                        app_rebuild(app);
+                        ui_toast(app, "共享已删除");
+                    } else {
+                        ui_toast(app, err[0] ? err : "删除共享失败");
+                    }
+                }
+            }
+            return;
+        }
+        else if (action == IN_CANCEL || action == IN_B) app_close_modal(app);
+        return;
+    }
+    if (app->modal == MODAL_EDITOR_HELP) {
+        if (action == IN_CANCEL || action == IN_CONFIRM ||
+            action == IN_A || action == IN_B || action == IN_SELECT)
             app_close_modal(app);
         return;
     }
@@ -3396,7 +3969,9 @@ static void input_overview(App *app, InputAction action)
             app->overview_kill_index = focus;
             app->overview_kill_at = now;
             char msg[256];
-            snprintf(msg, sizeof(msg), "再按一次 X 关闭 %s", t->title);
+            char hint[96];
+            ui_button_hint(app, hint, sizeof(hint), "再按一次 {X} 关闭");
+            snprintf(msg, sizeof(msg), "%s %s", hint, t->title);
             ui_toast(app, msg);
             audio_play(SND_NAV);
         }
@@ -3415,6 +3990,8 @@ static void input_overview(App *app, InputAction action)
         return;
     }
     if (focus != app->overview_focus) {
+        bool next = (action == IN_RIGHT || action == IN_RT);
+        app->overview_slide_dir = next ? 1 : -1;
         app->overview_focus = focus;
         app->overview_kill_armed = false;
         audio_play(SND_NAV);
@@ -3869,6 +4446,8 @@ static bool app_at_top_edge(App *app)
             return false;
         return app->store_on_sidebar && app->store_side_focus == 0;
     }
+    if (app->screen == SCREEN_EDITOR)
+        return app->editor.focus == 0;
     if (app->screen == SCREEN_OVERVIEW)
         return true;
     if (app->screen == SCREEN_SETTINGS) {
@@ -3905,10 +4484,11 @@ void app_launch_store(App *app)
 
 static int nav_index_for_screen(App *app)
 {
+    Screen want = app->screen == SCREEN_EDITOR ? SCREEN_FILES : app->screen;
     for (int i = 0; i < app->ui.nav_count; i++) {
         lv_obj_t *item = app->ui.nav_items[i];
         intptr_t v = item ? (intptr_t)lv_obj_get_user_data(item) : 0;
-        if (v > 0 && (Screen)(v - 1) == app->screen) return i;
+        if (v > 0 && (Screen)(v - 1) == want) return i;
     }
     return 0;
 }
@@ -3967,12 +4547,11 @@ static void app_input_nav(App *app, InputAction action)
         ui_update_nav_focus(app);
         audio_play(SND_NAV);
     } else if (action == IN_UP) {
+        /* 上键不再进入状态栏：状态栏只从最右侧导航项按右进入。 */
         app->nav_on_bar = false;
-        app->status_on_bar = true;
-        app->status_focus = 0;
+        app->status_on_bar = false;
         ui_update_nav_focus(app);
-        ui_update_status_focus(app);
-        audio_play(SND_NAV);
+        audio_play(SND_BACK);
     } else if (action == IN_DOWN || action == IN_CANCEL ||
                action == IN_B) {
         app->nav_on_bar = false;
@@ -3980,6 +4559,13 @@ static void app_input_nav(App *app, InputAction action)
         audio_play(SND_BACK);
     } else if (action == IN_CONFIRM || action == IN_A) {
         app->nav_on_bar = false;
+        if (app->screen == SCREEN_EDITOR && app->editor.active &&
+            app->editor.dirty) {
+            ui_update_nav_focus(app);
+            app_open_confirm(app, CONFIRM_EDITOR_DISCARD, 0,
+                             "放弃修改？", "有未保存的修改，离开将丢失。");
+            return;
+        }
         if (picking) {
             ui_update_nav_focus(app);
             audio_play(SND_BACK);
@@ -4156,6 +4742,11 @@ void app_input(App *app, InputAction action, const char *text)
         return;
     }
     if (app->modal != MODAL_NONE) { modal_input(app, action, text); return; }
+    if (app->screen == SCREEN_EDITOR &&
+        (action == IN_LB || action == IN_RB)) {
+        editor_input(app, action, text);
+        return;
+    }
     /* Shoulder buttons switch the top-level tabs on every screen, including
      * the embedded file manager and the overview. */
     if (action == IN_LB || action == IN_RB) {
@@ -4181,6 +4772,7 @@ void app_input(App *app, InputAction action, const char *text)
         return;
     }
     if (app->screen == SCREEN_FILES) { input_files(app, action); return; }
+    if (app->screen == SCREEN_EDITOR) { editor_input(app, action, text); return; }
     if (app->screen == SCREEN_HOME) input_home(app, action);
     else if (app->screen == SCREEN_GAMES || app->screen == SCREEN_FAVORITES || app->screen == SCREEN_RECENT) input_games(app, action);
     else if (app->screen == SCREEN_APPS) input_apps(app, action);
@@ -4211,6 +4803,7 @@ static void app_test_tokens(App *app, const char *tokens)
             else if (strcmp(tok, "lt") == 0) app_input(app, IN_LT, NULL);
             else if (strcmp(tok, "rt") == 0) app_input(app, IN_RT, NULL);
             else if (strcmp(tok, "menu") == 0) app_input(app, IN_START, NULL);
+            else if (strcmp(tok, "select") == 0) app_input(app, IN_SELECT, NULL);
             else if (strcmp(tok, "help") == 0) { app->modal = MODAL_HELP; ui_build_modal(app); }
             else if (strcmp(tok, "detail") == 0) { app->modal = MODAL_DETAIL; ui_build_modal(app); }
             else if (strcmp(tok, "control") == 0) app_open_control_center(app);
@@ -4229,6 +4822,21 @@ static void app_test_tokens(App *app, const char *tokens)
             else if (strcmp(tok, "quitconfirm") == 0) app_open_confirm(app, CONFIRM_QUIT, 0, "退出太极？", "当前设置已经自动保存。");
             else if (strcmp(tok, "mapping") == 0) { app->modal = MODAL_MAPPING; app->mapping_step = 0; backend_set_capture(true); ui_build_modal(app); }
             else if (strncmp(tok, "type:", 5) == 0) app_input(app, IN_TEXT, tok + 5);
+            else if (strncmp(tok, "edit:", 5) == 0) editor_open(app, tok + 5);
+            else if (strcmp(tok, "connect") == 0) {
+                app_goto_screen(app, SCREEN_FILES);
+                app->files_panel = FILES_PANEL_CONNECT;
+                app->smb_ui.focus = 0;
+                app->smb_ui.view = 0;
+                app_rebuild(app);
+            } else if (strcmp(tok, "manage") == 0) {
+                app_goto_screen(app, SCREEN_FILES);
+                app->files_panel = FILES_PANEL_MANAGE;
+                smb_local_refresh(app);
+                smb_service_query(app);
+                app->smb_ui.focus = 0;
+                app_rebuild(app);
+            }
             else if (strcmp(tok, "settings") == 0) app_goto_screen(app, SCREEN_SETTINGS);
             else if (strcmp(tok, "favorites") == 0) app_goto_screen(app, SCREEN_FAVORITES);
         }
@@ -4487,6 +5095,14 @@ void app_run(App *app)
                 if (session_request_pending("overview_request", req, sizeof(req))) {
                     unlink(req);
                     app_open_overview(app);
+                }
+                if (session_request_pending("brightness_request", req, sizeof(req))) {
+                    size_t blen = 0;
+                    char *bdata = read_file(req, &blen);
+                    unlink(req);
+                    int delta = bdata ? atoi(bdata) : 0;
+                    free(bdata);
+                    if (delta) app_brightness_step(app, delta);
                 }
             }
         }

@@ -32,6 +32,54 @@ static lv_obj_t *box(lv_obj_t *parent, int x, int y, int w, int h, int r, uint32
     return o;
 }
 
+typedef struct {
+    lv_obj_t *obj;
+    lv_timer_t *timer;
+    uint32_t last;
+} StoreBarFade;
+
+static void store_bar_delete(lv_event_t *e)
+{
+    StoreBarFade *f = lv_event_get_user_data(e);
+    if (!f) return;
+    if (f->timer) lv_timer_del(f->timer);
+    free(f);
+}
+
+static void store_bar_tick(lv_timer_t *t)
+{
+    StoreBarFade *f = lv_timer_get_user_data(t);
+    if (!f || !f->obj) return;
+    if (lv_tick_get() - f->last < 900) return;
+    if (lv_obj_get_style_bg_opa(f->obj, LV_PART_SCROLLBAR) != LV_OPA_TRANSP)
+        lv_obj_set_style_bg_opa(f->obj, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+}
+
+static void store_bar_scroll(lv_event_t *e)
+{
+    StoreBarFade *f = lv_event_get_user_data(e);
+    if (!f || !f->obj) return;
+    f->last = lv_tick_get();
+    lv_obj_set_style_bg_opa(f->obj, 120, LV_PART_SCROLLBAR);
+}
+
+static void store_scrollbar(lv_obj_t *o)
+{
+    if (!o) return;
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_width(o, ds(5), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(o, lv_color_hex(PAL.border_focus), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(o, ds(3), LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(o, ds(8), LV_PART_SCROLLBAR);
+    StoreBarFade *f = calloc(1, sizeof(*f));
+    if (!f) return;
+    f->obj = o;
+    lv_obj_add_event_cb(o, store_bar_scroll, LV_EVENT_SCROLL, f);
+    lv_obj_add_event_cb(o, store_bar_delete, LV_EVENT_DELETE, f);
+    f->timer = lv_timer_create(store_bar_tick, 200, f);
+}
+
 static lv_obj_t *label(lv_obj_t *parent, const char *text, lv_font_t *font,
                        uint32_t color, int x, int y, int w, int h)
 {
@@ -337,7 +385,7 @@ static void build_sidebar(StoreApp *app, int x, int y, int w, int h)
     lv_obj_t *box0 = box(app->root, x, y, w, h, ds(14), PAL.card);
     lv_obj_set_style_bg_opa(box0, 150, 0);
     lv_obj_set_scroll_dir(box0, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(box0, LV_SCROLLBAR_MODE_OFF);
+    store_scrollbar(box0);
     lv_obj_add_flag(box0, LV_OBJ_FLAG_SCROLLABLE);
     int row_h = ds(44);
     int gap = ds(4);
@@ -377,6 +425,7 @@ static void build_row(StoreApp *app, lv_obj_t *list, int pkg_index, int y,
     int icon_y = (row_h - icon_sz) / 2;
     if (p->icon[0] && access(p->icon, R_OK) == 0) {
         lv_obj_t *img = lv_image_create(row);
+        lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_style_all(img);
         lv_obj_set_pos(img, ds(10), icon_y);
         lv_obj_set_size(img, icon_sz, icon_sz);
@@ -438,14 +487,20 @@ static void build_detail(StoreApp *app, int w, int h)
                            FONT_SM, PAL.text2, ds(24), ds(106), pw - ds(48),
                            ph - ds(190));
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-    const char *action;
-    if (p->update_available) action = "A 更新";
-    else if (p->installed) action = p->removable ? "A 卸载" : "受保护，不能卸载";
-    else action = "A 安装";
-    label(panel, action, FONT_SM,
+    char action_buf[64];
+    const char *ok = backend_button_confirm_label(&app->backend);
+    if (p->update_available) snprintf(action_buf, sizeof(action_buf), "%s 更新", ok);
+    else if (p->installed) {
+        if (p->removable) snprintf(action_buf, sizeof(action_buf), "%s 卸载", ok);
+        else snprintf(action_buf, sizeof(action_buf), "受保护，不能卸载");
+    } else snprintf(action_buf, sizeof(action_buf), "%s 安装", ok);
+    label(panel, action_buf, FONT_SM,
           p->installed && !p->removable ? PAL.text3 : PAL.accent2,
           ds(24), ph - ds(62), pw - ds(48), ds(22));
-    label(panel, "B 返回", FONT_XS, PAL.text3, ds(24), ph - ds(34),
+    char back_buf[48];
+    snprintf(back_buf, sizeof(back_buf), "%s 返回",
+             backend_button_cancel_label(&app->backend));
+    label(panel, back_buf, FONT_XS, PAL.text3, ds(24), ph - ds(34),
           pw - ds(48), ds(18));
 }
 
@@ -482,7 +537,10 @@ static void build_task_overlay(StoreApp *app, int w, int h)
     lv_label_set_long_mode(ln, LV_LABEL_LONG_DOT);
     if (err[0]) label(panel, err, FONT_XS, PAL.danger, ds(20), ds(144),
                       pw - ds(40), ds(20));
-    label_center(panel, "B 取消", FONT_XS, PAL.text3, 0, ph - ds(24),
+    char cancel_buf[48];
+    snprintf(cancel_buf, sizeof(cancel_buf), "%s 取消",
+             backend_button_cancel_label(&app->backend));
+    label_center(panel, cancel_buf, FONT_XS, PAL.text3, 0, ph - ds(24),
                  pw, ds(18));
 }
 
@@ -507,9 +565,11 @@ void store_ui_build(StoreApp *app)
     char sline[160];
     if (app->search_edit)
         snprintf(sline, sizeof(sline), "%s|", app->search);
+    else if (app->search[0])
+        snprintf(sline, sizeof(sline), "%s", app->search);
     else
-        snprintf(sline, sizeof(sline), "%s%s", app->search[0] ? app->search : "按 X 搜索",
-                 app->search[0] ? "" : "");
+        snprintf(sline, sizeof(sline), "按 %s 搜索",
+                 backend_button_west_label(&app->backend));
     label(search, sline, FONT_XS, app->search[0] ? PAL.text : PAL.text3,
           ds(10), ds(4), w / 2 - ds(20), ds(16));
 
@@ -540,7 +600,7 @@ void store_ui_build(StoreApp *app)
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+    store_scrollbar(list);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     app->list = list;
 
@@ -564,9 +624,15 @@ void store_ui_build(StoreApp *app)
             build_row(app, list, i, (i - start) * row_h, lw, row_h);
     }
 
-    label_center(app->root,
-                 "左右 切换   A 打开   X 搜索   Y 刷新   B 退出   Start 全部更新",
-                 FONT_XS, PAL.text3, 0, h - ds(22), w, ds(16));
+    char footer[256];
+    snprintf(footer, sizeof(footer),
+             "左右 切换   %s 打开   %s 搜索   %s 刷新   %s 退出   %s 全部更新",
+             backend_button_confirm_label(&app->backend),
+             backend_button_west_label(&app->backend),
+             backend_button_north_label(&app->backend),
+             backend_button_cancel_label(&app->backend),
+             backend_start_label(&app->backend));
+    label_center(app->root, footer, FONT_XS, PAL.text3, 0, h - ds(22), w, ds(16));
     if (app->show_detail) build_detail(app, w, h);
     if (app->task_running) build_task_overlay(app, w, h);
 
