@@ -16,6 +16,7 @@
 #include "libretro.h"
 #include "util.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
@@ -128,6 +129,9 @@ void app_apply_gamepad_config(App *app)
 
 void app_save_settings(App *app)
 {
+    /* The OOBE keeps its choices in memory and writes one config at the end,
+     * so an interrupted first-run setup is offered again next boot. */
+    if (app->oobe && !app->oobe_finishing) return;
     config_save(&app->config);
     app_apply_gamepad_config(app);
     audio_set_enabled(app->config.sound);
@@ -175,6 +179,13 @@ const char *app_timezone_option_id(App *app, int index)
 const char *app_timezone_option_label(App *app, int index)
 {
     return app_timezone_option_id(app, index);
+}
+
+int app_timezone_current_option(App *app)
+{
+    int idx = timezone_current_index(app);
+    if (idx >= 0) return idx;
+    return app_timezone_option_count(app) - 1;
 }
 
 void app_set_language(App *app, int lang)
@@ -257,12 +268,44 @@ void app_init(App *app)
     sigaction(SIGUSR2, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
     config_init(&app->config);
+    {
+        char cfg_path[4096];
+        snprintf(cfg_path, sizeof(cfg_path), "%s/config.ini", taiji_config_dir());
+        struct stat cfg_st;
+        bool missing = stat(cfg_path, &cfg_st) != 0 || cfg_st.st_size == 0;
+        if (!missing) {
+            /* 只有注释/空白的配置等同于空配置：仍然进入初始设置。 */
+            char *data = read_file(cfg_path, NULL);
+            missing = !data || !config_text_has_settings(data);
+            free(data);
+        }
+        app->config_missing = missing;
+    }
     config_load(&app->config);
     app->files_show_hidden = true;
     if (app->config.language < 0 || app->config.language > 1)
         app->config.language = 0;
     i18n_set_language(app->config.language);
     system_language_export(app->config.language);
+    {
+        const char *skip_oobe = getenv("TAIJI_SKIP_OOBE");
+        const char *force_oobe = getenv("TAIJI_OOBE");
+        if ((force_oobe && *force_oobe == '1') ||
+            (!(skip_oobe && *skip_oobe == '1') && app->config_missing)) {
+            app->oobe = true;
+            app->oobe_step = OOBE_STEP_WELCOME;
+            app->oobe_focus = 0;
+            app->oobe_finishing = false;
+            app->oobe_rom[0] = '\0';
+            if (app->config_missing) {
+                /* 首次启动默认使用自动主题；强制重跑 OOBE 时保留用户主题。 */
+                app->config.theme_auto = true;
+                app->config.auto_dark_min = -1;
+                app->config.auto_light_min = -1;
+            }
+            app->oobe_tz = app_timezone_current_option(app);
+        }
+    }
     library_init(&app->library);
     apps_init(&app->apps);
     apps_load(&app->apps);
@@ -1303,14 +1346,34 @@ static bool power_request_pending(char *path, size_t path_size)
     return access(path, F_OK) == 0;
 }
 
-static bool session_request_pending(const char *name, char *path, size_t path_size)
+static void session_request_path(const char *name, bool targeted,
+                                 char *path, size_t path_size)
 {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
-    if (runtime && *runtime)
-        snprintf(path, path_size, "%s/taiji/%s", runtime, name);
+    const char *base = (runtime && *runtime) ? runtime : "/tmp";
+    if (targeted)
+        snprintf(path, path_size, "%s/taiji/%s.%ld", base, name, (long)getpid());
     else
-        snprintf(path, path_size, "/tmp/taiji/%s", name);
+        snprintf(path, path_size, "%s/taiji/%s", base, name);
+}
+
+static bool session_request_pending(const char *name, char *path, size_t path_size)
+{
+    /* Targeted request first: the session scripts address the Taiji window
+     * they just focused, so a second instance cannot swallow the request. */
+    session_request_path(name, true, path, path_size);
+    if (access(path, F_OK) == 0) return true;
+    session_request_path(name, false, path, path_size);
     return access(path, F_OK) == 0;
+}
+
+static void session_request_clear(const char *name)
+{
+    char path[512];
+    session_request_path(name, true, path, sizeof(path));
+    unlink(path);
+    session_request_path(name, false, path, sizeof(path));
+    unlink(path);
 }
 
 /* ── Multitask overview ──────────────────────────────────────────────────── */
@@ -2412,7 +2475,7 @@ void app_settings_rows(App *app, int *count)
     else if (app->settings_cat == 2) *count = 14;
     else if (app->settings_cat == 3) *count = 6;
     else if (app->settings_cat == 4) *count = 9;
-    else if (app->settings_cat == 5) *count = 4;
+    else if (app->settings_cat == 5) *count = 7;
     else *count = 0;
 }
 
@@ -2668,20 +2731,41 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
                 *kind = 1;
                 break;
             }
-            case 1:
+            case 1: {
+                char now[64];
+                time_t t = time(NULL);
+                struct tm tm;
+                localtime_r(&t, &tm);
+                strftime(now, sizeof(now), "%Y-%m-%d  %H:%M", &tm);
+                snprintf(title, title_size, "日期与时间");
+                snprintf(value, value_size, "%s", now);
+                *kind = 1;
+                break;
+            }
+            case 2:
                 snprintf(title, title_size, "语言");
                 snprintf(value, value_size, "%s",
                          app->config.language == 1 ? "English" : "中文");
                 *kind = 3;
                 break;
-            case 2:
+            case 3:
                 snprintf(title, title_size, "关于本机");
                 snprintf(value, value_size, "系统与版本信息");
                 *kind = 1;
                 break;
-            case 3:
+            case 4:
                 snprintf(title, title_size, "开源许可");
                 snprintf(value, value_size, "GPL-3.0-or-later");
+                *kind = 1;
+                break;
+            case 5:
+                snprintf(title, title_size, "重新运行初始设置");
+                snprintf(value, value_size, "重新设置语言、时区与显示");
+                *kind = 1;
+                break;
+            case 6:
+                snprintf(title, title_size, "还原太极设置");
+                snprintf(value, value_size, "恢复默认设置并重走初始设置");
                 *kind = 1;
                 break;
             default: return false;
@@ -2718,6 +2802,287 @@ static void app_cycle_render_scale(App *app, int dir)
     backend_set_render_scale(&app->backend, app->config.render_scale);
     app_rebuild(app);
 }
+
+/* ── OOBE setters ─────────────────────────────────────────────────────────── */
+
+void app_oobe_apply_language(App *app, int lang)
+{
+    app->config.language = lang == 1 ? 1 : 0;
+    i18n_set_language(app->config.language);
+}
+
+void app_oobe_apply_theme(App *app, int preset, bool auto_mode)
+{
+    if (auto_mode) {
+        app->config.theme_auto = true;
+    } else {
+        if (preset < 0 || preset >= theme_preset_count()) preset = 0;
+        app->config.theme_auto = false;
+        app->config.theme = preset;
+    }
+    app->active_theme = app_theme_preset(app);
+    theme_set_preset(app->active_theme);
+}
+
+void app_oobe_cycle_ui_scale(App *app, int dir)
+{
+    int steps[16];
+    int max = app_ui_scale_max(app);
+    int sn = app_ui_scale_values(steps, 16, max);
+    int avail[17];
+    int n = 0;
+    avail[n++] = 0;
+    for (int i = sn - 1; i >= 0; i--) avail[n++] = steps[i];
+    int idx = 0;
+    if (!app->config.ui_scale_auto) {
+        for (int i = 1; i < n; i++)
+            if (avail[i] == app->config.ui_scale) { idx = i; break; }
+    }
+    idx = (idx + dir + n) % n;
+    if (avail[idx] == 0) {
+        app->config.ui_scale_auto = true;
+    } else {
+        app->config.ui_scale_auto = false;
+        app->config.ui_scale = avail[idx];
+    }
+    app_apply_system_scale(app);
+    app_rebuild(app);
+}
+
+void app_oobe_cycle_refresh(App *app, int dir)
+{
+    static const int vals[] = {0, 60, 120};
+    int idx = 0;
+    for (int i = 0; i < 3; i++)
+        if (vals[i] == app->config.refresh_hz) idx = i;
+    idx = (idx + dir + 3) % 3;
+    app->config.refresh_hz = vals[idx];
+    backend_set_refresh_limit(&app->backend, app->config.refresh_hz);
+    app_rebuild(app);
+}
+
+void app_oobe_cycle_render(App *app, int dir)
+{
+    static const int vals[] = {100, 75, 67, 50};
+    int idx = 0;
+    for (int i = 0; i < 4; i++)
+        if (vals[i] == app->config.render_scale) idx = i;
+    idx = (idx + dir + 4) % 4;
+    app->config.render_scale = vals[idx];
+    backend_set_render_scale(&app->backend, app->config.render_scale);
+    app_rebuild(app);
+}
+
+static int oobe_days_in_month(int year, int month)
+{
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12) return 31;
+    if (month == 2) {
+        bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        return leap ? 29 : 28;
+    }
+    return days[month - 1];
+}
+
+void app_oobe_date_open(App *app)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    app->oobe_date[0] = tm.tm_year + 1900;
+    app->oobe_date[1] = tm.tm_mon + 1;
+    app->oobe_date[2] = tm.tm_mday;
+    app->oobe_date[3] = tm.tm_hour;
+    app->oobe_date[4] = tm.tm_min;
+    app->oobe_date_field = 0;
+    app->modal = MODAL_OOBE_DATE;
+    ui_build_modal(app);
+}
+
+void app_oobe_date_set_field(App *app, int field)
+{
+    if (field < 0 || field > 4) return;
+    app->oobe_date_field = field;
+    if (app->ui.oobe_date_boxes[field])
+        ui_oobe_date_focus_update(app);
+    else
+        ui_refresh_modal(app);
+}
+
+void app_oobe_date_apply(App *app)
+{
+    char error[256] = {0};
+    if (!system_datetime_set(app->oobe_date[0], app->oobe_date[1],
+                             app->oobe_date[2], app->oobe_date[3],
+                             app->oobe_date[4], error, sizeof(error))) {
+        ui_toast(app, error[0] ? error : "修改日期失败");
+        return;
+    }
+    app_close_modal(app);
+    ui_toast(app, tr("日期与时间已设置"));
+}
+
+static void oobe_date_clamp(App *app)
+{
+    if (app->oobe_date[0] < 1970) app->oobe_date[0] = 1970;
+    if (app->oobe_date[0] > 2100) app->oobe_date[0] = 2100;
+    if (app->oobe_date[1] < 1) app->oobe_date[1] = 12;
+    if (app->oobe_date[1] > 12) app->oobe_date[1] = 1;
+    int max_day = oobe_days_in_month(app->oobe_date[0], app->oobe_date[1]);
+    if (app->oobe_date[2] < 1) app->oobe_date[2] = max_day;
+    if (app->oobe_date[2] > max_day) app->oobe_date[2] = 1;
+    if (app->oobe_date[3] < 0) app->oobe_date[3] = 23;
+    if (app->oobe_date[3] > 23) app->oobe_date[3] = 0;
+    if (app->oobe_date[4] < 0) app->oobe_date[4] = 59;
+    if (app->oobe_date[4] > 59) app->oobe_date[4] = 0;
+}
+
+static void app_oobe_date_input(App *app, InputAction action)
+{
+    int field = app->oobe_date_field;
+    if (field < 0) field = 0;
+    if (field > 4) field = 4;
+
+    if (action == IN_CANCEL || action == IN_B) {
+        app_close_modal(app);
+        return;
+    }
+    if (action == IN_LEFT) {
+        app->oobe_date_field = field > 0 ? field - 1 : 4;
+        ui_refresh_modal(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_RIGHT) {
+        app->oobe_date_field = field < 4 ? field + 1 : 0;
+        ui_refresh_modal(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_UP || action == IN_DOWN) {
+        int delta = action == IN_UP ? 1 : -1;
+        app->oobe_date[field] += delta;
+        oobe_date_clamp(app);
+        ui_refresh_modal(app);
+        audio_play(SND_NAV);
+        return;
+    }
+    if (action == IN_CONFIRM || action == IN_A) app_oobe_date_apply(app);
+}
+
+void app_oobe_cycle_paused(App *app, int dir)
+{
+    app->config.max_paused_apps += dir;
+    if (app->config.max_paused_apps < 1) app->config.max_paused_apps = 6;
+    if (app->config.max_paused_apps > 6) app->config.max_paused_apps = 1;
+    app_rebuild(app);
+}
+
+/* 还原太极设置：配置文件、游戏库缓存和运行期状态都回到出厂默认，
+ * 然后立刻重走初始设置。用户自己的游戏文件不会被删除。 */
+static void app_clear_icon_cache(void)
+{
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s/icons", taiji_config_dir());
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+            char *path = path_join(dir, ent->d_name);
+            if (path) {
+                unlink(path);
+                free(path);
+            }
+        }
+        closedir(d);
+        rmdir(dir);
+    }
+}
+
+void app_reset_settings(App *app)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/config.ini", taiji_config_dir());
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/library.tsv", taiji_config_dir());
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/apps.tsv", taiji_config_dir());
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/shares.tsv", taiji_config_dir());
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/.desktop-imported", taiji_config_dir());
+    unlink(path);
+    app_clear_icon_cache();
+
+    /* 本地 SMB 共享也一起清掉，恢复到出厂状态。 */
+    smb_local_refresh(app);
+    int guard = 0;
+    while (app->smb_ui.local_count > 0 && guard++ < 64) {
+        /* smb_local_remove 会重新载入列表，先复制名字再删除。 */
+        char name[128];
+        snprintf(name, sizeof(name), "%s", app->smb_ui.local[0].name);
+        char err[160] = "";
+        if (!smb_local_remove(app, name, err, sizeof(err))) break;
+    }
+    smb_local_refresh(app);
+    app->smb_ui.local_count = 0;
+    app->smb_ui.focus = 0;
+    app->share_count = 0;
+
+    library_free(&app->library);
+    library_init(&app->library);
+    apps_free(&app->apps);
+    apps_init(&app->apps);
+    apps_load(&app->apps);
+#ifdef __linux__
+    desktop_import_auto(&app->apps);
+#endif
+    if (app->screen == SCREEN_EDITOR) editor_close(app);
+    app_files_favorites_reset();
+
+    config_free(&app->config);
+    config_init(&app->config);
+    app->config.theme_auto = true;
+
+    app->active_theme = app_theme_preset(app);
+    theme_set_preset(app->active_theme);
+    app_apply_theme(app, false);
+    i18n_set_language(app->config.language);
+    system_language_export(app->config.language);
+    app_apply_gamepad_config(app);
+    audio_set_enabled(app->config.sound);
+    audio_set_volume(app->config.volume);
+    app_apply_system_scale(app);
+    backend_set_refresh_limit(&app->backend, app->config.refresh_hz);
+    backend_set_render_scale(&app->backend, app->config.render_scale);
+
+    app->config_missing = true;
+    app->settings_about = false;
+    app->settings_license = false;
+    app->settings_on_rail = false;
+    app->settings_row = 0;
+    app->settings_cat = 5;
+    app->status_on_bar = false;
+    app->nav_on_bar = false;
+    app->grid_columns = app->config.grid_columns;
+    app->sort_mode = SORT_NAME;
+    app->filter_mode = FILTER_ALL;
+    app->game_focus = 0;
+    app->game_page = 0;
+    app->home_focus = 0;
+    app->app_focus = 0;
+    app->app_page = 0;
+    app->app_cat_focus = 0;
+    app->app_on_categories = false;
+    snprintf(app->app_cat, sizeof(app->app_cat), "all");
+    snprintf(app->collection_id, sizeof(app->collection_id), "all");
+    app->selected_game_id[0] = '\0';
+    app->files_show_hidden = true;
+    oobe_start(app, false);
+}
+
 
 static void app_cycle_refresh(App *app, int dir)
 {
@@ -2822,19 +3187,27 @@ void app_settings_activate(App *app, int row)
         if (row == 0) {
             app_open_choice(app, CHOICE_TIMEZONE, "时区");
         } else if (row == 1) {
-            app_open_choice(app, CHOICE_LANGUAGE, "选择语言");
+            app_oobe_date_open(app);
         } else if (row == 2) {
+            app_open_choice(app, CHOICE_LANGUAGE, "选择语言");
+        } else if (row == 3) {
             app->settings_about = true;
             app->settings_license = false;
             app->settings_on_rail = false;
             app->settings_row = 0;
             app_rebuild(app);
-        } else if (row == 3) {
+        } else if (row == 4) {
             app->settings_about = false;
             app->settings_license = true;
             app->settings_on_rail = false;
             app->settings_row = 3;
             app_rebuild(app);
+        } else if (row == 5) {
+            app_open_confirm(app, CONFIRM_RERUN_OOBE, 0, "重新运行初始设置？",
+                             "会重新走一遍语言、时区、主题和目录设置，完成后保存。");
+        } else if (row == 6) {
+            app_open_confirm(app, CONFIRM_RESET_TAIJI, 0, "还原太极设置？",
+                             "所有设置会恢复默认，应用列表、文件收藏、共享书签和本地共享都会清空，游戏文件不会被删除。");
         }
         return;
     }
@@ -2883,7 +3256,7 @@ void app_settings_adjust(App *app, int row, int dir)
         if (row == 1) { app_cycle_render_scale(app, dir); return; }
         row -= 3;
     }
-    if (app->settings_cat == 5 && row == 1) {
+    if (app->settings_cat == 5 && row == 2) {
         app_set_language(app, app->config.language == 1 ? 0 : 1);
         return;
     }
@@ -3307,6 +3680,9 @@ static void finish_text(App *app)
                app->text_purpose == TEXT_SMB_AUTH_PASS) {
         app_files_smb_auth_done(app);
         return;
+    } else if (app->text_purpose == TEXT_OOBE_ROM) {
+        app_oobe_rom_done(app);
+        return;
     } else if (app->text_purpose == TEXT_COMMAND) {
         char pending[80];
         snprintf(pending, sizeof(pending), "%s", app->core_pending_game_id);
@@ -3438,6 +3814,14 @@ static void run_confirm(App *app)
     }
     if (app->confirm_purpose == CONFIRM_EDITOR_DISCARD) {
         editor_leave(app);
+        return;
+    }
+    if (app->confirm_purpose == CONFIRM_RERUN_OOBE) {
+        oobe_start(app, true);
+        return;
+    }
+    if (app->confirm_purpose == CONFIRM_RESET_TAIJI) {
+        app_reset_settings(app);
         return;
     }
     if (app->confirm_purpose == CONFIRM_RESET_MAP) {
@@ -3579,6 +3963,7 @@ static void modal_search_input(App *app, InputAction action, const char *text)
 static void modal_input(App *app, InputAction action, const char *text)
 {
     if (action == IN_FULLSCREEN) { backend_toggle_fullscreen(&app->backend); return; }
+    if (app->modal == MODAL_OOBE_DATE) { app_oobe_date_input(app, action); return; }
     if (app->modal == MODAL_TEXT) { modal_text_input(app, action, text); return; }
     if (app->modal == MODAL_APP) { modal_app_input(app, action); return; }
     if (app->modal == MODAL_CONTROL) {
@@ -4737,11 +5122,15 @@ void app_input(App *app, InputAction action, const char *text)
         if (app->modal != MODAL_NONE) ui_build_modal(app);
         return;
     }
-    if (action == IN_SCAN && app->modal == MODAL_NONE) {
+    if (action == IN_SCAN && app->modal == MODAL_NONE && !app->oobe) {
         app_rescan(app);
         return;
     }
     if (app->modal != MODAL_NONE) { modal_input(app, action, text); return; }
+    if (app->oobe && app->files_pick == FILES_PICK_NONE) {
+        oobe_input(app, action);
+        return;
+    }
     if (app->screen == SCREEN_EDITOR &&
         (action == IN_LB || action == IN_RB)) {
         editor_input(app, action, text);
@@ -4922,12 +5311,14 @@ void app_run(App *app)
     app_apply_gamepad_config(app);
     app_update_pad_labels(app);
 
-    if (!library_load_cache(&app->library)) {
-        ui_splash(app, "正在扫描游戏库...");
-        library_scan(&app->library, &app->config, scan_progress, app);
-    } else if (app->config.scan_on_start && app->config.root_count > 0) {
-        ui_splash(app, "正在更新游戏库...");
-        library_scan(&app->library, &app->config, scan_progress, app);
+    if (!app->oobe) {
+        if (!library_load_cache(&app->library)) {
+            ui_splash(app, "正在扫描游戏库...");
+            library_scan(&app->library, &app->config, scan_progress, app);
+        } else if (app->config.scan_on_start && app->config.root_count > 0) {
+            ui_splash(app, "正在更新游戏库...");
+            library_scan(&app->library, &app->config, scan_progress, app);
+        }
     }
 
     Collection cols[128];
@@ -4936,7 +5327,7 @@ void app_run(App *app)
         if (strcmp(cols[i].id, app->collection_id) == 0) { app->home_focus = i; break; }
     }
     app_rebuild(app);
-    const char *start_screen = getenv("TAIJI_START_SCREEN");
+    const char *start_screen = app->oobe ? NULL : getenv("TAIJI_START_SCREEN");
     if (start_screen) {
         if (strcmp(start_screen, "settings") == 0) app_goto_screen(app, SCREEN_SETTINGS);
         else if (strcmp(start_screen, "favorites") == 0) app_goto_screen(app, SCREEN_FAVORITES);
@@ -5010,6 +5401,7 @@ void app_run(App *app)
         }
         if (lv_tick_get() - last_runtime_poll > 150) {
             last_runtime_poll = lv_tick_get();
+            if (app->oobe) ui_oobe_tick(app);
             app_refresh_runtime(app);
             app_files_poll(app);
             if (app->screen == SCREEN_STORE) {
@@ -5087,19 +5479,25 @@ void app_run(App *app)
             if (lv_tick_get() - last_session_poll > 150) {
                 last_session_poll = lv_tick_get();
                 char req[512];
-                if (session_request_pending("return_request", req, sizeof(req))) {
-                    unlink(req);
-                    if (app->ui_suspended) app_set_ui_suspended(app, false);
-                    if (app->screen == SCREEN_OVERVIEW) app_close_overview(app);
-                }
-                if (session_request_pending("overview_request", req, sizeof(req))) {
-                    unlink(req);
-                    app_open_overview(app);
+                if (app->oobe) {
+                    /* 初始设置期间忽略概览/返回请求，避免盖住 OOBE 或关掉日期弹窗。 */
+                    session_request_clear("overview_request");
+                    session_request_clear("return_request");
+                } else {
+                    if (session_request_pending("return_request", req, sizeof(req))) {
+                        session_request_clear("return_request");
+                        if (app->ui_suspended) app_set_ui_suspended(app, false);
+                        if (app->screen == SCREEN_OVERVIEW) app_close_overview(app);
+                    }
+                    if (session_request_pending("overview_request", req, sizeof(req))) {
+                        session_request_clear("overview_request");
+                        app_open_overview(app);
+                    }
                 }
                 if (session_request_pending("brightness_request", req, sizeof(req))) {
                     size_t blen = 0;
                     char *bdata = read_file(req, &blen);
-                    unlink(req);
+                    session_request_clear("brightness_request");
                     int delta = bdata ? atoi(bdata) : 0;
                     free(bdata);
                     if (delta) app_brightness_step(app, delta);

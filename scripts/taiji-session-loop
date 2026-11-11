@@ -12,6 +12,16 @@ SCALE_ENV="${XDG_RUNTIME_DIR:-/tmp}/taiji/scale"
 SCALE_HELPER="${TAIJI_SCALE_HELPER:-/usr/libexec/taiji/taiji-scale}"
 [ -x "$SCALE_HELPER" ] && "$SCALE_HELPER" taiji >/dev/null 2>&1 || true
 
+# Wayland is the default client backend for the Wayland kiosk session.
+# Keep the choice local to Taiji: exporting SDL_VIDEODRIVER here would leak
+# into every app launched by taiji-run-app and force a backend onto programs
+# that need SDL to fall back (xemu's Wayland backend fails on some devices).
+TAIJI_VIDEO_DRIVER=""
+if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    TAIJI_VIDEO_DRIVER="${SDL_VIDEODRIVER:-wayland}"
+fi
+unset SDL_VIDEODRIVER
+
 # Volume OSD that can sit above fullscreen windows (layer-shell on Wayland,
 # override-redirect on X11).
 OSD="${TAIJI_OSD:-/usr/libexec/taiji/taiji-osd}"
@@ -33,11 +43,6 @@ if [ -f "$RESUME_FILE" ]; then
     export TAIJI_START_SCREEN="$(cat "$RESUME_FILE" 2>/dev/null || echo apps)"
 fi
 
-# Wayland is the default client backend for the Wayland kiosk session.
-# Explicit SDL_VIDEODRIVER (for example x11) still wins for debugging.
-if [ "${TAIJI_SESSION_MODE:-}" = "wayland" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
-fi
 
 # The renderer default is opengles2 in config (and in main.c when unset).
 # Do not force SDL_RENDER_DRIVER here: the in-app renderer setting must keep
@@ -60,7 +65,12 @@ fi
 WAYLAND_FALLBACK_TRIED=0
 while :; do
     START=$(date +%s 2>/dev/null || echo 0)
-    "$TAIJI_BIN" --kiosk >>"$LOG_DIR/session.log" 2>&1
+    if [ -n "$TAIJI_VIDEO_DRIVER" ]; then
+        SDL_VIDEODRIVER="$TAIJI_VIDEO_DRIVER" "$TAIJI_BIN" --kiosk \
+            >>"$LOG_DIR/session.log" 2>&1
+    else
+        "$TAIJI_BIN" --kiosk >>"$LOG_DIR/session.log" 2>&1
+    fi
     CODE=$?
     END=$(date +%s 2>/dev/null || echo 0)
     ELAPSED=$((END - START))
@@ -74,9 +84,9 @@ while :; do
     # through XWayland so a transient compositor/EGL failure cannot leave a
     # permanently black kiosk session.
     if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 77 ] && [ "$ELAPSED" -lt 5 ] &&
-       [ "${SDL_VIDEODRIVER:-}" = "wayland" ] && [ "$WAYLAND_FALLBACK_TRIED" = "0" ]; then
+       [ "$TAIJI_VIDEO_DRIVER" = "wayland" ] && [ "$WAYLAND_FALLBACK_TRIED" = "0" ]; then
         WAYLAND_FALLBACK_TRIED=1
-        export SDL_VIDEODRIVER=x11
+        TAIJI_VIDEO_DRIVER=x11
         echo "[taiji-session-loop] Wayland backend failed (code $CODE); retrying with XWayland" >>"$LOG_DIR/session.log"
         continue
     fi

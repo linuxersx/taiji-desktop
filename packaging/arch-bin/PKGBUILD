@@ -2,7 +2,7 @@
 # Prebuilt aarch64 payload. Build the source package if you need x86_64.
 pkgname=taiji-bin
 pkgver=1.0.0
-pkgrel=184
+pkgrel=185
 pkgdesc="Taiji retro game library, app launcher and kiosk frontend (prebuilt aarch64)"
 arch=('aarch64')
 license=('GPL-3.0-or-later')
@@ -69,7 +69,7 @@ optdepends=(
 backup=('etc/sddm.conf.d/taiji.conf')
 install=taiji-bin.install
 source=("taiji-$pkgver-$CARCH.tar.gz")
-sha256sums=('bb40ef8c2d227bb7c360c09ae30f7cb2d1c999315974fb84fac0af4017c112b0')
+sha256sums=('ab89997e3850036d15e19e94f46e6a410cf11f6fb25cb13f93db65960ef7b87d')
 
 package() {
   cp -a "$srcdir/taiji-$pkgver-$CARCH/." "$pkgdir/"

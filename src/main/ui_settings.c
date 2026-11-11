@@ -370,7 +370,7 @@ void ui_build_settings(App *app)
             lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
             const char *tail = kind == 1 ? ">" : "";
             char right[600];
-            if (value[0]) snprintf(right, sizeof(right), "%s  %s", value, tail);
+            if (value[0]) snprintf(right, sizeof(right), "%s  %s", tr(value), tail);
             else snprintf(right, sizeof(right), "%s", tail);
             int value_line = ui_unscale_y(lv_font_get_line_height(FONT_XS));
             int value_h = value_line + 2;

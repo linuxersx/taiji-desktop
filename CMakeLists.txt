@@ -105,6 +105,8 @@ add_executable(taiji
   src/main/ui_overview.c
   src/main/editor.c
   src/main/ui_editor.c
+  src/main/oobe.c
+  src/main/ui_oobe.c
 )
 
 target_include_directories(taiji PRIVATE

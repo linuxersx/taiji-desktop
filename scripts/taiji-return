@@ -79,8 +79,7 @@ write_state() {
 }
 
 write_return_request() {
-    mkdir -p "$STATE_DIR" 2>/dev/null || true
-    printf '1\n' > "$STATE_DIR/return_request" 2>/dev/null || true
+    write_request return_request
 }
 
 capture_preview() {

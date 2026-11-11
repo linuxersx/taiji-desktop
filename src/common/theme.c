@@ -66,6 +66,16 @@ void theme_set_preset(int preset)
     PAL = PRESETS[preset].p;
 }
 
+void theme_preview_colors(int preset, uint32_t *bg, uint32_t *card,
+                          uint32_t *accent)
+{
+    int n = (int)(sizeof(PRESETS) / sizeof(PRESETS[0]));
+    if (preset < 0 || preset >= n) preset = 0;
+    if (bg) *bg = PRESETS[preset].p.bg;
+    if (card) *card = PRESETS[preset].p.card;
+    if (accent) *accent = PRESETS[preset].p.accent;
+}
+
 const char *theme_preset_name(int preset)
 {
     int n = (int)(sizeof(PRESETS) / sizeof(PRESETS[0]));

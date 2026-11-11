@@ -156,7 +156,8 @@ bool app_files_pick_supported(App *app)
     if (!app_files_available()) return false;
     return app->text_purpose == TEXT_ROOT || app->text_purpose == TEXT_APP_ICON ||
            app->text_purpose == TEXT_EXTRACT_DIR ||
-           app->text_purpose == TEXT_SMB_SHARE_PATH;
+           app->text_purpose == TEXT_SMB_SHARE_PATH ||
+           app->text_purpose == TEXT_OOBE_ROM;
 }
 
 void app_files_pick_start(App *app)
@@ -178,6 +179,8 @@ void app_files_pick_start(App *app)
     }
     free(expanded);
 
+    external_osk_hide(app);
+    ui_set_input_active(false);
     app->files_pick_return = app->screen;
     app->files_pick = pick_file ? FILES_PICK_FILE : FILES_PICK_DIR;
     snprintf(app->files_cwd, sizeof(app->files_cwd), "%s", start);
@@ -440,6 +443,15 @@ static void files_favs_load(void)
         snprintf(g_files_favs[g_files_fav_count++], PATH_MAX, "%s", line);
     }
     free(data);
+}
+
+void app_files_favorites_reset(void)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/files_favorites", taiji_config_dir());
+    unlink(path);
+    g_files_fav_count = -1;
+    files_favs_load();
 }
 
 bool app_files_favorite_contains(const char *path)

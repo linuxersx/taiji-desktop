@@ -30,6 +30,8 @@ static bool command_exists(const char *name)
     return found;
 }
 
+static bool run_status_limited(const char *cmd);
+
 static int run_status(const char *cmd)
 {
     FILE *f = popen(cmd, "r");
@@ -40,6 +42,16 @@ static int run_status(const char *cmd)
     if (rc < 0) return -1;
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return 1;
+}
+
+static bool run_status_limited(const char *cmd)
+{
+    char buf[2048];
+    if (command_exists("timeout"))
+        snprintf(buf, sizeof(buf), "timeout 5 %s", cmd);
+    else
+        snprintf(buf, sizeof(buf), "%s", cmd);
+    return run_status(buf) == 0;
 }
 
 static bool read_line(const char *cmd, char *out, size_t n)
@@ -127,7 +139,7 @@ bool system_timezone_set(const char *tz, char *error, size_t error_size)
     bool ok = false;
     if (command_exists("timedatectl")) {
         snprintf(cmd, sizeof(cmd), "timedatectl set-timezone %s >/dev/null 2>&1", q);
-        ok = run_status(cmd) == 0;
+        ok = run_status_limited(cmd);
         if (!ok) {
             snprintf(cmd, sizeof(cmd), "timedatectl set-timezone %s", q);
             ok = privileged_shell(cmd);
@@ -144,6 +156,69 @@ bool system_timezone_set(const char *tz, char *error, size_t error_size)
         return false;
     }
     setenv("TZ", tz, 1);
+    tzset();
+    return true;
+}
+
+bool system_datetime_set(int year, int month, int day, int hour, int minute,
+                         char *error, size_t error_size)
+{
+    if (error && error_size) error[0] = '\0';
+    if (year < 1970 || year > 2100 || month < 1 || month > 12 ||
+        day < 1 || day > 31 || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59) {
+        if (error) snprintf(error, error_size, "日期或时间超出范围");
+        return false;
+    }
+
+    /* 用 mktime 归一化，拒绝 2 月 31 日之类的日期。 */
+    struct tm probe = {0};
+    probe.tm_year = year - 1900;
+    probe.tm_mon = month - 1;
+    probe.tm_mday = day;
+    probe.tm_hour = hour;
+    probe.tm_min = minute;
+    probe.tm_isdst = -1;
+    struct tm fixed = probe;
+    time_t stamp = mktime(&fixed);
+    if (stamp == (time_t)-1 || fixed.tm_year != probe.tm_year ||
+        fixed.tm_mon != probe.tm_mon || fixed.tm_mday != probe.tm_mday) {
+        if (error) snprintf(error, error_size, "该日期不存在");
+        return false;
+    }
+
+    char value[64];
+    snprintf(value, sizeof(value), "%04d-%02d-%02d %02d:%02d:00",
+             year, month, day, hour, minute);
+    char cmd[256];
+    bool ok = false;
+    bool had_ntp = false;
+    if (command_exists("timedatectl")) {
+        char ntp[16] = {0};
+        had_ntp = read_line("timedatectl show -p NTP --value 2>/dev/null",
+                            ntp, sizeof(ntp)) && strcmp(ntp, "yes") == 0;
+        /* 手动设置时间前关闭 NTP，否则时间会立刻被同步回去；
+         * 设置失败时恢复原来的 NTP 状态。 */
+        run_status_limited("timedatectl set-ntp false >/dev/null 2>&1");
+        snprintf(cmd, sizeof(cmd), "timedatectl set-time \"%s\" >/dev/null 2>&1",
+                 value);
+        ok = run_status_limited(cmd);
+        if (!ok) {
+            snprintf(cmd, sizeof(cmd), "timedatectl set-time \"%s\"", value);
+            ok = privileged_shell(cmd);
+        }
+    }
+    if (!ok) {
+        snprintf(cmd, sizeof(cmd), "date -s \"%s\"", value);
+        ok = privileged_shell(cmd);
+        if (ok) privileged_shell("hwclock -w");
+    }
+    if (!ok) {
+        if (had_ntp)
+            run_status_limited("timedatectl set-ntp true >/dev/null 2>&1");
+        if (error) snprintf(error, error_size, "修改日期失败，需要系统权限");
+        return false;
+    }
     tzset();
     return true;
 }

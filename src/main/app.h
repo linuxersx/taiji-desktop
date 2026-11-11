@@ -101,6 +101,7 @@ typedef enum {
     MODAL_POWER,
     MODAL_GAMEPAD,
     MODAL_SMB_SHARE,
+    MODAL_OOBE_DATE,
 } ModalKind;
 
 typedef enum {
@@ -125,6 +126,7 @@ typedef enum {
     TEXT_SMB_SHARE_NAME,
     TEXT_SMB_AUTH_USER,
     TEXT_SMB_AUTH_PASS,
+    TEXT_OOBE_ROM,
 } TextPurpose;
 
 typedef enum {
@@ -168,6 +170,8 @@ typedef enum {
     CONFIRM_PASTE_OVERWRITE,
     CONFIRM_FILE_DELETE_PERM,
     CONFIRM_EDITOR_DISCARD,
+    CONFIRM_RERUN_OOBE,
+    CONFIRM_RESET_TAIJI,
 } ConfirmPurpose;
 
 typedef enum {
@@ -214,6 +218,17 @@ typedef struct {
     int count;
     uint32_t accent;
 } Collection;
+
+typedef enum {
+    OOBE_STEP_WELCOME = 0,
+    OOBE_STEP_LANGUAGE,
+    OOBE_STEP_TIMEZONE,
+    OOBE_STEP_THEME,
+    OOBE_STEP_NETWORK,
+    OOBE_STEP_GAMES,
+    OOBE_STEP_OTHER,
+    OOBE_STEP_COUNT
+} OobeStep;
 
 #define SMB_SCAN_MAX 64
 #define SMB_SCAN_SHARES 16
@@ -446,6 +461,18 @@ typedef struct App {
     bool files_loaded;
     EditorState editor;
     SmbUi smb_ui;
+    bool config_missing;
+    bool oobe;
+    int oobe_step;
+    int oobe_focus;
+    bool oobe_finishing;
+    int oobe_tz;
+    int oobe_date_field;
+    int oobe_date[5];
+    int oobe_tz_scroll;
+    int oobe_content_scroll;
+    int oobe_last_step;
+    char oobe_rom[PATH_MAX];
     FilesPickMode files_pick;
     FilesPanel files_panel;
     Screen files_pick_return;
@@ -662,9 +689,25 @@ void app_files_favorite_toggle(App *app);
 void input_files(App *app, InputAction action);
 bool app_files_available(void);
 bool app_files_pick_supported(App *app);
+void app_files_favorites_reset(void);
 void app_files_pick_start(App *app);
 void app_files_smb_text_done(App *app);
 void app_files_share_text_done(App *app);
+void app_oobe_rom_done(App *app);
+void app_oobe_date_open(App *app);
+void app_oobe_date_apply(App *app);
+void app_oobe_date_set_field(App *app, int field);
+void oobe_input(App *app, InputAction action);
+void oobe_finish(App *app);
+void oobe_start(App *app, bool prefill);
+void app_reset_settings(App *app);
+void app_oobe_apply_language(App *app, int lang);
+void app_oobe_apply_theme(App *app, int preset, bool auto_mode);
+void app_oobe_cycle_ui_scale(App *app, int dir);
+void app_oobe_cycle_refresh(App *app, int dir);
+void app_oobe_cycle_render(App *app, int dir);
+void app_oobe_cycle_paused(App *app, int dir);
+int app_timezone_current_option(App *app);
 void app_files_smb_auth_done(App *app);
 
 #endif

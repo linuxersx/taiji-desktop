@@ -150,5 +150,5 @@ fi
 swaymsg_run workspace taiji
 focus_taiji
 
-printf '1\n' > "$STATE_DIR/return_request" 2>/dev/null || true
-printf '1\n' > "$STATE_DIR/overview_request" 2>/dev/null || true
+write_request return_request
+write_request overview_request

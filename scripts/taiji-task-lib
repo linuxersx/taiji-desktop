@@ -119,7 +119,11 @@ task_write() {
     mv -f "$tmp" "$file" 2>/dev/null || true
 }
 
+# PID of the Taiji window selected by focus_taiji (0 when unknown).
+TAIJI_FOCUS_PID=""
+
 focus_taiji() {
+    TAIJI_FOCUS_PID=""
     if command -v swaymsg >/dev/null 2>&1; then
         sock="${SWAYSOCK:-}"
         if [ -z "$sock" ] || [ ! -S "$sock" ]; then
@@ -141,22 +145,34 @@ focus_taiji() {
         }
         sway workspace taiji
         cid=""
+        cpid=""
         if command -v jq >/dev/null 2>&1; then
             if [ -n "$sock" ]; then
                 tree=$(SWAYSOCK="$sock" swaymsg -s "$sock" -t get_tree 2>/dev/null)
             else
                 tree=$(swaymsg -t get_tree 2>/dev/null)
             fi
-            cid=$(printf '%s\n' "$tree" | jq -r '
+            # Prefer the window that is already focused (the most recently
+            # used Taiji instance); fall back to the first Taiji window.
+            info=$(printf '%s\n' "$tree" | jq -r '
                 .. | objects
                 | select(.id? != null)
                 | select((((.app_id // "") | test("taiji"; "i")) or
                           ((.window_properties.class // "") | test("taiji"; "i")) or
                           ((.name // "") | test("^(太极|Taiji)"; "i"))))
-                | .id' 2>/dev/null | head -n 1)
+                | "\(.id) \(.pid // 0) \(.focused // false)"' 2>/dev/null)
+            line=$(printf '%s\n' "$info" | awk '$3 == "true" { print; exit }')
+            [ -n "$line" ] || line=$(printf '%s\n' "$info" | head -n 1)
+            if [ -n "$line" ]; then
+                set -- $line
+                cid="$1"
+                cpid="$2"
+            fi
         fi
         if [ -n "$cid" ]; then
             sway "[con_id=$cid]" focus
+            case "$cpid" in (*[!0-9]*|'') cpid="" ;; esac
+            TAIJI_FOCUS_PID="$cpid"
         else
             sway "[app_id=taiji]" focus
             sway "[class=taiji]" focus
@@ -166,4 +182,24 @@ focus_taiji() {
     if command -v wmctrl >/dev/null 2>&1; then
         wmctrl -a "太极 / Taiji" >/dev/null 2>&1 || wmctrl -a "Taiji" >/dev/null 2>&1 || true
     fi
+}
+
+# Write a one-shot request for the Taiji instance selected by focus_taiji.
+# A targeted file (name.<pid>) keeps multiple Taiji instances from racing for
+# the same request; the generic file is kept as a fallback.
+write_request() {
+    _name="$1"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    for _f in "$STATE_DIR/$_name".*; do
+        [ -e "$_f" ] || continue
+        _pid=${_f##*.}
+        case "$_pid" in (*[!0-9]*|'') continue ;; esac
+        kill -0 "$_pid" 2>/dev/null || rm -f "$_f" 2>/dev/null || true
+    done
+    if [ -n "${TAIJI_FOCUS_PID:-}" ] && [ "$TAIJI_FOCUS_PID" -gt 0 ] 2>/dev/null; then
+        printf '1\n' > "$STATE_DIR/$_name.$TAIJI_FOCUS_PID" 2>/dev/null || true
+    fi
+    # Keep the generic file for Taiji builds that predate targeted requests.
+    # A current build consumes the targeted file and clears both.
+    printf '1\n' > "$STATE_DIR/$_name" 2>/dev/null || true
 }

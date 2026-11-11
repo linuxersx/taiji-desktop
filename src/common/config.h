@@ -55,6 +55,9 @@ typedef struct {
 void config_init(Config *c);
 void config_free(Config *c);
 void config_load(Config *c);
+
+/* True when the config text contains at least one key=value line. */
+bool config_text_has_settings(const char *text);
 void config_save(const Config *c);
 
 void config_add_root(Config *c, const char *path);

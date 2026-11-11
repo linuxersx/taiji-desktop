@@ -3,6 +3,11 @@
 # foreground app changes; use taiji-return/taiji-resume to show it again.
 set -u
 
+# External apps pick their own video backend. Taiji's Wayland choice must not
+# leak here: a forced SDL_VIDEODRIVER can break apps whose Wayland backend is
+# unavailable, instead of letting SDL fall back to XWayland.
+unset SDL_VIDEODRIVER
+
 ID="${1:-music}"
 shift 1 2>/dev/null || true
 CMD="$*"

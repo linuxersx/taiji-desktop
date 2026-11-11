@@ -1063,6 +1063,12 @@ static void ui_root_gesture(lv_event_t *e)
 
 void ui_build(App *app)
 {
+    /* 记住时区列表的滚动位置：整页重建后仍从原位置继续，
+     * 只有焦点真正到达可视区边缘时才滚动。 */
+    if (app->oobe && app->ui.oobe_tz_list)
+        app->oobe_tz_scroll = lv_obj_get_scroll_y(app->ui.oobe_tz_list);
+    if (app->oobe && app->ui.oobe_content)
+        app->oobe_content_scroll = lv_obj_get_scroll_y(app->ui.oobe_content);
     g_ui_building = true;
     if (app->ui.modal) {
         app->modal = MODAL_NONE;
@@ -1096,6 +1102,26 @@ void ui_build(App *app)
     lv_obj_remove_flag(root, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(root, ui_root_gesture, LV_EVENT_GESTURE, app);
     app->ui.root = root;
+
+    /* A full rebuild recreates every widget: drop cached OOBE clock labels so
+     * the periodic tick never touches freed objects. */
+    app->ui.oobe_big_clock = NULL;
+    app->ui.oobe_big_date = NULL;
+    app->ui.oobe_big_zone[0] = '\0';
+    app->ui.oobe_date_label = NULL;
+    app->ui.oobe_clock_count = 0;
+    app->ui.oobe_content = NULL;
+    app->ui.oobe_focus_obj = NULL;
+    app->ui.oobe_tz_list = NULL;
+
+    if (app->oobe && app->files_pick == FILES_PICK_NONE) {
+        ui_build_oobe(app);
+        if (app->modal != MODAL_NONE) ui_build_modal(app);
+        if (app->toast_text[0] && app->toast_until > lv_tick_get())
+            ui_toast(app, app->toast_text);
+        g_ui_building = false;
+        return;
+    }
 
     switch (app->screen) {
         case SCREEN_GAMES:
@@ -1235,6 +1261,10 @@ static void fade_out_done(lv_anim_t *a)
     app->ui.control_brightness_icon = NULL;
     app->ui.control_brightness_bar = NULL;
     app->ui.control_brightness_slider = NULL;
+    for (int i = 0; i < 5; i++) {
+        app->ui.oobe_date_boxes[i] = NULL;
+        app->ui.oobe_date_values[i] = NULL;
+    }
     app->control_closing = false;
     app->modal_closing = false;
     if (app->modal == ctx->modal) app->modal = MODAL_NONE;
@@ -1579,6 +1609,7 @@ static void modal_overlay_clicked(lv_event_t *e)
         case MODAL_SCAN:
         case MODAL_MAPPING:
         case MODAL_CONTROL:
+        case MODAL_OOBE_DATE:
             return;
         default:
             break;
@@ -1647,6 +1678,7 @@ static void ui_build_modal_body(App *app)
         case MODAL_POWER: ui_build_modal_power(app); break;
         case MODAL_GAMEPAD: ui_build_modal_gamepad(app); break;
         case MODAL_SMB_SHARE: ui_build_modal_smb_share(app); break;
+        case MODAL_OOBE_DATE: ui_build_modal_oobe_date(app); break;
         default: break;
     }
 }

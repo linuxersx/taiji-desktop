@@ -42,6 +42,7 @@ void theme_set_scale(float scale);
 void theme_set_preset(int preset);
 const char *theme_preset_name(int preset);
 int theme_preset_count(void);
+void theme_preview_colors(int preset, uint32_t *bg, uint32_t *card, uint32_t *accent);
 uint32_t platform_accent(const char *platform_id);
 
 #endif

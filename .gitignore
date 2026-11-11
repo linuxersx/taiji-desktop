@@ -18,6 +18,9 @@ taiji-src/
 # Split into its own repository: https://github.com/linuxersx/armdeck-osk
 armdeck-osk/
 
+# Local progress log, kept out of the public repository
+TODO.md
+
 # macOS
 .DS_Store
 ._*

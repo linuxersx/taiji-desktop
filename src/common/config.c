@@ -159,14 +159,34 @@ static void add_default_roots(Config *c)
     }
 }
 
+bool config_text_has_settings(const char *text)
+{
+    if (!text) return false;
+    char *copy = xstrdup(text);
+    bool found = false;
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line && !found;
+         line = strtok_r(NULL, "\n", &save)) {
+        line = str_trim(line);
+        if (!*line || *line == '#') continue;
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        if (*str_trim(line)) found = true;
+    }
+    free(copy);
+    return found;
+}
+
 void config_load(Config *c)
 {
     char path[4096];
     config_file_path(path, sizeof(path));
     char *data = read_file(path, NULL);
     if (!data) {
+        /* Leave the file absent: the first-run OOBE decides when to write it,
+         * and an interrupted setup must be offered again on the next boot. */
         add_default_roots(c);
-        config_save(c);
         return;
     }
 

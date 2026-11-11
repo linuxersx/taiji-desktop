@@ -3,6 +3,11 @@
 # usage: taiji-run-app <id> <mode> <on_return> <command...>
 set -u
 
+# External apps pick their own video backend. Taiji's Wayland choice must not
+# leak here: a forced SDL_VIDEODRIVER can break apps whose Wayland backend is
+# unavailable, instead of letting SDL fall back to XWayland.
+unset SDL_VIDEODRIVER
+
 ID="${1:-app}"
 MODE="${2:-auto}"
 ON_RETURN="${3:-pause}"

@@ -2,6 +2,7 @@
 #include "app.h"
 #include "smb_share.h"
 #include "catalog.h"
+#include "i18n.h"
 #include "theme.h"
 #include "util.h"
 
@@ -1087,4 +1088,119 @@ void ui_build_modal_scan(App *app)
     ui_label(panel, "文件较多时可能需要几秒", FONT_XS, PAL.text3,
              40, 146, 380, 20);
     (void)app;
+}
+
+/* ── OOBE date & time ─────────────────────────────────────────────────────── */
+
+typedef struct {
+    App *app;
+    int field;
+} DateFieldCtx;
+
+static void oobe_date_field_cb(lv_event_t *e)
+{
+    DateFieldCtx *ctx = lv_event_get_user_data(e);
+    if (ctx && ctx->app) app_oobe_date_set_field(ctx->app, ctx->field);
+}
+
+static void oobe_date_apply_cb(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (app) app_oobe_date_apply(app);
+}
+
+static void oobe_date_cancel_cb(lv_event_t *e)
+{
+    App *app = lv_event_get_user_data(e);
+    if (app) app_close_modal(app);
+}
+
+void ui_build_modal_oobe_date(App *app)
+{
+    lv_obj_t *panel = ui_modal_panel(app, 640, 360);
+    ui_label(panel, tr("设置日期与时间"), FONT_XL, PAL.text, 30, 26, 580, 36);
+    lv_obj_t *sub = ui_label(panel, tr("左右选择要修改的部分，上下调整数值；应用后会关闭自动时间同步。"),
+                             FONT_XS, PAL.text3, 30, 70, 580, 20);
+    lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
+
+    static const char *units[5] = {"年", "月", "日", "时", "分"};
+    for (int i = 0; i < 5; i++) {
+        app->ui.oobe_date_boxes[i] = NULL;
+        app->ui.oobe_date_values[i] = NULL;
+    }
+    int bw = 96, gap = 12, bh = 88;
+    int total = 5 * bw + 4 * gap;
+    int x0 = (640 - total) / 2;
+    int y0 = 108;
+    for (int i = 0; i < 5; i++) {
+        bool sel = app->oobe_date_field == i;
+        lv_obj_t *box = ui_rect(panel, x0 + i * (bw + gap), y0, bw, bh, 14,
+                                sel ? PAL.accent : PAL.card_soft);
+        lv_obj_set_style_bg_opa(box, sel ? 55 : 140, 0);
+        lv_obj_set_style_border_width(box, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(box, lv_color_hex(sel ? PAL.border_focus
+                                                           : PAL.border), 0);
+        lv_obj_set_style_border_opa(box, sel ? 220 : 90, 0);
+        lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+        DateFieldCtx *ctx = xmalloc(sizeof(*ctx));
+        ctx->app = app;
+        ctx->field = i;
+        lv_obj_add_event_cb(box, oobe_date_field_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(box, modal_ctx_free, LV_EVENT_DELETE, ctx);
+
+        char value[16];
+        if (i == 0) snprintf(value, sizeof(value), "%04d", app->oobe_date[0]);
+        else if (i == 1 || i == 2 || i == 3 || i == 4)
+            snprintf(value, sizeof(value), "%02d", app->oobe_date[i]);
+
+        lv_obj_t *v = ui_label_center(box, value, FONT_LG,
+                                      sel ? PAL.text : PAL.text2,
+                                      0, 16, bw, 34);
+        lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_CENTER, 0);
+        ui_label_center(box, tr(units[i]), FONT_XS, PAL.text3, 0, 56, bw, 18);
+        app->ui.oobe_date_boxes[i] = box;
+        app->ui.oobe_date_values[i] = v;
+    }
+
+    char preview[64];
+    snprintf(preview, sizeof(preview), "%04d-%02d-%02d  %02d:%02d",
+             app->oobe_date[0], app->oobe_date[1], app->oobe_date[2],
+             app->oobe_date[3], app->oobe_date[4]);
+    ui_label_center(panel, preview, FONT_MD, PAL.accent2, 0, 212, 640, 26);
+
+    lv_obj_t *apply = ui_rect(panel, 150, 258, 150, 44, 22, PAL.accent);
+    lv_obj_set_style_bg_opa(apply, 220, 0);
+    lv_obj_add_flag(apply, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(apply, tr("应用修改"), FONT_MD, 0xFFFFFFFF, 0, 10, 150, 24);
+    lv_obj_add_event_cb(apply, oobe_date_apply_cb, LV_EVENT_CLICKED, app);
+
+    lv_obj_t *cancel = ui_rect(panel, 340, 258, 150, 44, 22, PAL.card);
+    lv_obj_set_style_bg_opa(cancel, 170, 0);
+    lv_obj_add_flag(cancel, LV_OBJ_FLAG_CLICKABLE);
+    ui_label_center(cancel, tr("取消"), FONT_MD, PAL.text2, 0, 10, 150, 24);
+    lv_obj_add_event_cb(cancel, oobe_date_cancel_cb, LV_EVENT_CLICKED, app);
+
+    char hint[160];
+    ui_button_hint(app, hint, sizeof(hint),
+                   tr("左右 选择 / 上下 调整 / {A} 应用 / {B} 取消"));
+    ui_label_center(panel, hint, FONT_XS, PAL.text3, 0, 320, 640, 20);
+}
+
+void ui_oobe_date_focus_update(App *app)
+{
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *box = app->ui.oobe_date_boxes[i];
+        if (!box) continue;
+        bool sel = i == app->oobe_date_field;
+        lv_obj_set_style_bg_color(box, lv_color_hex(sel ? PAL.accent : PAL.card_soft), 0);
+        lv_obj_set_style_bg_opa(box, sel ? 55 : 140, 0);
+        lv_obj_set_style_border_width(box, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(
+            box, lv_color_hex(sel ? PAL.border_focus : PAL.border), 0);
+        lv_obj_set_style_border_opa(box, sel ? 220 : 90, 0);
+        if (app->ui.oobe_date_values[i])
+            lv_obj_set_style_text_color(
+                app->ui.oobe_date_values[i],
+                lv_color_hex(sel ? PAL.text : PAL.text2), 0);
+    }
 }
