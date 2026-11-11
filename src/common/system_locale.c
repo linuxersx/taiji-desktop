@@ -223,6 +223,38 @@ bool system_datetime_set(int year, int month, int day, int hour, int minute,
     return true;
 }
 
+bool system_ntp_get(bool *enabled)
+{
+    if (!enabled || !command_exists("timedatectl")) return false;
+    char value[16] = {0};
+    if (!read_line("timedatectl show -p NTP --value 2>/dev/null",
+                   value, sizeof(value)))
+        return false;
+    *enabled = strcmp(value, "yes") == 0;
+    return true;
+}
+
+bool system_ntp_set(bool enabled, char *error, size_t error_size)
+{
+    if (error && error_size) error[0] = '\0';
+    if (!command_exists("timedatectl")) {
+        if (error) snprintf(error, error_size, "系统不支持时间同步");
+        return false;
+    }
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd), "timedatectl set-ntp %s >/dev/null 2>&1",
+             enabled ? "true" : "false");
+    bool ok = run_status_limited(cmd);
+    if (!ok) {
+        snprintf(cmd, sizeof(cmd), "timedatectl set-ntp %s",
+                 enabled ? "true" : "false");
+        ok = privileged_shell(cmd);
+    }
+    if (!ok && error)
+        snprintf(error, error_size, "修改自动时间同步失败，需要系统权限");
+    return ok;
+}
+
 static const char *language_locale(int lang)
 {
     return lang == 1 ? "en_US.UTF-8" : "zh_CN.UTF-8";

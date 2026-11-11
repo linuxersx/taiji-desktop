@@ -2475,7 +2475,7 @@ void app_settings_rows(App *app, int *count)
     else if (app->settings_cat == 2) *count = 14;
     else if (app->settings_cat == 3) *count = 6;
     else if (app->settings_cat == 4) *count = 9;
-    else if (app->settings_cat == 5) *count = 7;
+    else if (app->settings_cat == 5) *count = 8;
     else *count = 0;
 }
 
@@ -2742,28 +2742,38 @@ bool app_settings_row_info(App *app, int row, char *title, size_t title_size,
                 *kind = 1;
                 break;
             }
-            case 2:
+            case 2: {
+                bool ntp = false;
+                snprintf(title, title_size, "自动时间同步");
+                if (system_ntp_get(&ntp))
+                    snprintf(value, value_size, "%s", ntp ? "开启" : "关闭");
+                else
+                    snprintf(value, value_size, "不可用");
+                *kind = 2;
+                break;
+            }
+            case 3:
                 snprintf(title, title_size, "语言");
                 snprintf(value, value_size, "%s",
                          app->config.language == 1 ? "English" : "中文");
                 *kind = 3;
                 break;
-            case 3:
+            case 4:
                 snprintf(title, title_size, "关于本机");
                 snprintf(value, value_size, "系统与版本信息");
                 *kind = 1;
                 break;
-            case 4:
+            case 5:
                 snprintf(title, title_size, "开源许可");
                 snprintf(value, value_size, "GPL-3.0-or-later");
                 *kind = 1;
                 break;
-            case 5:
+            case 6:
                 snprintf(title, title_size, "重新运行初始设置");
                 snprintf(value, value_size, "重新设置语言、时区与显示");
                 *kind = 1;
                 break;
-            case 6:
+            case 7:
                 snprintf(title, title_size, "还原太极设置");
                 snprintf(value, value_size, "恢复默认设置并重走初始设置");
                 *kind = 1;
@@ -3189,23 +3199,34 @@ void app_settings_activate(App *app, int row)
         } else if (row == 1) {
             app_oobe_date_open(app);
         } else if (row == 2) {
-            app_open_choice(app, CHOICE_LANGUAGE, "选择语言");
+            bool ntp = false;
+            char err[160] = "";
+            if (!system_ntp_get(&ntp)) {
+                ui_toast(app, "系统不支持时间同步");
+            } else if (system_ntp_set(!ntp, err, sizeof(err))) {
+                ui_toast(app, !ntp ? "自动时间同步已开启" : "自动时间同步已关闭");
+                app_rebuild(app);
+            } else {
+                ui_toast(app, err[0] ? err : "修改自动时间同步失败");
+            }
         } else if (row == 3) {
+            app_open_choice(app, CHOICE_LANGUAGE, "选择语言");
+        } else if (row == 4) {
             app->settings_about = true;
             app->settings_license = false;
             app->settings_on_rail = false;
             app->settings_row = 0;
             app_rebuild(app);
-        } else if (row == 4) {
+        } else if (row == 5) {
             app->settings_about = false;
             app->settings_license = true;
             app->settings_on_rail = false;
             app->settings_row = 3;
             app_rebuild(app);
-        } else if (row == 5) {
+        } else if (row == 6) {
             app_open_confirm(app, CONFIRM_RERUN_OOBE, 0, "重新运行初始设置？",
                              "会重新走一遍语言、时区、主题和目录设置，完成后保存。");
-        } else if (row == 6) {
+        } else if (row == 7) {
             app_open_confirm(app, CONFIRM_RESET_TAIJI, 0, "还原太极设置？",
                              "所有设置会恢复默认，应用列表、文件收藏、共享书签和本地共享都会清空，游戏文件不会被删除。");
         }
@@ -3256,7 +3277,7 @@ void app_settings_adjust(App *app, int row, int dir)
         if (row == 1) { app_cycle_render_scale(app, dir); return; }
         row -= 3;
     }
-    if (app->settings_cat == 5 && row == 2) {
+    if (app->settings_cat == 5 && row == 3) {
         app_set_language(app, app->config.language == 1 ? 0 : 1);
         return;
     }
