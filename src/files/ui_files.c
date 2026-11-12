@@ -2263,8 +2263,7 @@ static void files_tool_side_cb(lv_event_t *e)
 static int files_keycap_width(const char *key)
 {
     const char *label = (key && *key) ? key : "L2";
-    int w = ui_unscale_x(lv_text_get_width(label,
-                                           (uint32_t)strlen(label), FONT_XS, 0)) + 8;
+    int w = ui_unscale_x(ui_text_width(label, (uint32_t)strlen(label), FONT_XS, 0)) + 8;
     return ui_clamp(w, 18, 28);
 }
 

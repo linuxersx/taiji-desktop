@@ -3,10 +3,6 @@
  *
  */
 
-/**
- * Modified by NXP in 2024
- */
-
 #ifndef LV_DRAW_PRIVATE_H
 #define LV_DRAW_PRIVATE_H
 
@@ -18,9 +14,10 @@ extern "C" {
  *      INCLUDES
  *********************/
 
-#include "lv_draw.h"
-#include "../osal/lv_os.h"
+#include "../lvgl_public.h"
+#include "../osal/lv_os_private.h"
 #include "../misc/cache/lv_cache.h"
+#include "../misc/cache/lv_cache_entry.h"
 
 /*********************
  *      DEFINES
@@ -45,9 +42,6 @@ struct _lv_draw_task_t {
      */
     lv_area_t _real_area;
 
-    /** The original area which is updated*/
-    lv_area_t clip_area_original;
-
     /**
      * The clip area of the layer is saved here when the draw task is created.
      * As the clip area of the layer can be changed as new draw tasks are added its current value needs to be saved.
@@ -67,6 +61,9 @@ struct _lv_draw_task_t {
     volatile int state;              /** int instead of lv_draw_task_state_t to be sure its atomic */
 
     void * draw_dsc;
+
+    /** Opacity of the layer */
+    lv_opa_t opa;
 
     /**
      * The ID of the draw_unit which should take this task
@@ -171,6 +168,12 @@ struct _lv_draw_unit_t {
      * @return
      */
     int32_t (*delete_cb)(lv_draw_unit_t * draw_unit);
+
+    /**
+     * Called when an event is sent to the draw unit.
+     * @param event pointer to the event descriptor
+     */
+    void (*event_cb)(lv_event_t * event);
 };
 
 typedef struct {
@@ -189,6 +192,13 @@ typedef struct {
 /**********************
  * GLOBAL PROTOTYPES
  **********************/
+
+/**
+ * Free a draw task and everything it owns
+ * Used both by the normal dispatch path and to unwind a redraw that is being abandoned.
+ * @param  t      draw task to free
+ */
+void lv_draw_cleanup_task(lv_draw_task_t * t);
 
 /**********************
  *      MACROS

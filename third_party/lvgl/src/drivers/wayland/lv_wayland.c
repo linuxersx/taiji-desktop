@@ -6,55 +6,30 @@
  *      INCLUDES
  *********************/
 
-#include "lv_wayland.h"
+#include "lv_wayland_private.h"
 
 #if LV_USE_WAYLAND
-
-#if LV_WAYLAND_BUF_COUNT < 1 || LV_WAYLAND_BUF_COUNT > 2
-    #error "Invalid LV_WAYLAND_BUF_COUNT. Expected either 1 or 2"
-#endif
-
-#if !LV_WAYLAND_USE_DMABUF && LV_WAYLAND_BUF_COUNT != 1
-    #error "Wayland doesn't support more than 1 LV_WAYLAND_BUF_COUNT without DMABUF"
-#endif
-
-#if LV_WAYLAND_USE_DMABUF && !LV_USE_DRAW_G2D
-    #error "LV_WAYLAND_USE_DMABUF requires LV_USE_DRAW_G2D"
-#endif
-
-#if LV_WAYLAND_USE_DMABUF && LV_WAYLAND_WINDOW_DECORATIONS
-    #error "LV_WAYLAND_USE_DMABUF doesn't support LV_WAYLAND_WINDOW_DECORATIONS"
-#endif
-
-#ifndef LV_DISPLAY_RENDER_MODE_PARTIAL
-    /* FIXME: Hacky fix else building fails with -Wundef=error*/
-    #define LV_DISPLAY_RENDER_MODE_PARTIAL 0
-    #define LV_DISPLAY_RENDER_MODE_DIRECT 1
-    #define LV_DISPLAY_RENDER_MODE_FULL 2
-#endif
-
-#if LV_WAYLAND_USE_DMABUF && LV_WAYLAND_RENDER_MODE == LV_DISPLAY_RENDER_MODE_PARTIAL
-    #error "LV_WAYLAND_USE_DMABUF doesn't support LV_DISPLAY_RENDER_MODE_PARTIAL"
-#endif
-
-#if !LV_WAYLAND_USE_DMABUF && LV_WAYLAND_RENDER_MODE != LV_DISPLAY_RENDER_MODE_PARTIAL
-    #error "Wayland without DMABUF only supports LV_DISPLAY_RENDER_MODE_PARTIAL"
-#endif
 
 #if (LV_COLOR_DEPTH == 8 || LV_COLOR_DEPTH == 1)
     #error[wayland] Unsupported LV_COLOR_DEPTH
 #endif
 
+#ifdef LV_WAYLAND_WINDOW_DECORATIONS
+    #if LV_WAYLAND_WINDOW_DECORATIONS == 1
+        #warning LV_WAYLAND_WINDOW_DECORATIONS has been removed for v9.5. \
+        It's now the user's responsibility to generate their own window decorations. See `lv_win`
+    #endif
+#endif
+
+#include LV_STDDEF_INCLUDE
+#include LV_STDINT_INCLUDE
+#include LV_STDBOOL_INCLUDE
 #include "lv_wayland_private.h"
-#include <stddef.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include <poll.h>
 #include <sys/mman.h>
 #include <linux/input.h>
@@ -63,42 +38,111 @@
 #include <wayland-cursor.h>
 #include <xkbcommon/xkbcommon.h>
 
-#if LV_WAYLAND_USE_DMABUF
-    #include <wayland_linux_dmabuf.h>
-#endif
-
-#include "lvgl.h"
-
 /*********************
  *      DEFINES
  *********************/
+
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+    #define LV_WAYLAND_WL_OUTPUT_VERSION 4
+#else
+    #define LV_WAYLAND_WL_OUTPUT_VERSION 2
+#endif
 
 
 /**********************
  *      TYPEDEFS
  **********************/
 
-struct lv_wayland_context lv_wl_ctx;
 
 /**********************
  *  STATIC PROTOTYPES
  **********************/
 
+/* Timer callback to process Wayland compositor events without blocking the UI.
+ * We use an independent timer so that we always read and flush compositor events even if LVGL
+ * doesn't need to redraw anything.
+ */
+static void read_compositor_events_timer_cb(lv_timer_t * timer);
+
 static void handle_global(void * data, struct wl_registry * registry, uint32_t name, const char * interface,
                           uint32_t version);
 static void handle_global_remove(void * data, struct wl_registry * registry, uint32_t name);
-static void handle_input(void);
-static void handle_output(void);
 
 static uint32_t tick_get_cb(void);
+
+static void output_scale(void * data, struct wl_output * output, int32_t factor);
+static void output_mode(void * data, struct wl_output * output, uint32_t flags, int32_t width, int32_t height,
+                        int32_t refresh);
+static void output_done(void * data, struct wl_output * output);
+static void output_geometry(void * data, struct wl_output * output, int32_t x, int32_t y, int32_t physical_width,
+                            int32_t physical_height, int32_t subpixel, const char * make, const char * model, int32_t transform);
+
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+    static void output_name(void * data, struct wl_output * output, const char * name);
+    static void output_description(void * data, struct wl_output * output, const char * description);
+#endif
+
+static void xdg_output_logical_position(void * data, struct zxdg_output_v1 * xdg_output, int32_t x, int32_t y);
+static void xdg_output_logical_size(void * data, struct zxdg_output_v1 * xdg_output, int32_t width, int32_t height);
+static void xdg_output_done(void * data, struct zxdg_output_v1 * xdg_output);
+static void xdg_output_name(void * data, struct zxdg_output_v1 * xdg_output, const char * name);
+static void xdg_output_description(void * data, struct zxdg_output_v1 * xdg_output, const char * description);
+
+/* Attaches an zxdg_output_v1 to 'info' so that the compositor reports its
+ * connector name and logical size. No-op if the compositor doesn't support it. */
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+
+static void output_name(void * data, struct wl_output * output, const char * name)
+{
+    LV_UNUSED(output);
+    lv_wl_output_info_t * info = data;
+
+    /* The core protocol is authoritative, xdg-output reports the same name */
+    snprintf(info->name, sizeof(info->name), "%s", name);
+}
+
+static void output_description(void * data, struct wl_output * output, const char * description)
+{
+    /* A human readable description of the output,
+     * Skipped since we identify outputs by their connector name */
+    LV_UNUSED(data);
+    LV_UNUSED(output);
+    LV_UNUSED(description);
+}
+
+#endif /*WL_OUTPUT_NAME_SINCE_VERSION*/
+
+static void output_bind_xdg_output(lv_wl_output_info_t * info);
 
 /**********************
  *  STATIC VARIABLES
  **********************/
 
-static bool is_wayland_initialized                         = false;
-static const struct wl_registry_listener registry_listener = {.global        = handle_global,
-           .global_remove = handle_global_remove
+static bool is_wayland_initialized = false;
+lv_wl_ctx_t lv_wl_ctx;
+
+static const struct wl_registry_listener registry_listener = {
+    .global = handle_global,
+    .global_remove = handle_global_remove
+};
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry,
+    .mode = output_mode,
+    .done = output_done,
+    .scale = output_scale,
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+    .name = output_name,
+    .description = output_description,
+#endif
+};
+
+static const struct zxdg_output_v1_listener xdg_output_listener = {
+    .logical_position = xdg_output_logical_position,
+    .logical_size = xdg_output_logical_size,
+    .done = xdg_output_done,
+    .name = xdg_output_name,
+    .description = xdg_output_description
 };
 
 /**********************
@@ -111,203 +155,341 @@ static const struct wl_registry_listener registry_listener = {.global        = h
  */
 int lv_wayland_get_fd(void)
 {
-    return wl_display_get_fd(lv_wl_ctx.display);
+    if(!is_wayland_initialized) {
+        LV_LOG_ERROR("Wayland is not initialized");
+        return -1;
+    }
+    return wl_display_get_fd(lv_wl_ctx.wl_display);
 }
 
-uint32_t lv_wayland_timer_handler(void)
+uint8_t lv_wayland_get_output_count(void)
 {
-    struct window * window;
+    return lv_wl_ctx.wl_output_count;
+}
 
-    /* Wayland input handling - it will also trigger the frame done handler */
-    handle_input();
+const char * lv_wayland_get_output_name(uint8_t output)
+{
+    LV_CHECK_ARG_FORMAT_MSG(output < lv_wl_ctx.wl_output_count, return NULL,
+                            "Invalid output '%d'. Expected '0'..'%d'",
+                            output, lv_wl_ctx.wl_output_count - 1);
 
-    /* Ready input timers (to probe for any input received) */
-    LV_LL_READ(&lv_wl_ctx.window_ll, window) {
-        LV_LOG_TRACE("handle timer frame: %d", window->frame_counter);
+    const lv_wl_output_info_t * info = lv_wl_ctx.physical_outputs[output];
 
-        if(window != NULL && window->resize_pending) {
-            if(lv_wayland_window_resize(window, window->resize_width, window->resize_height) == LV_RESULT_OK) {
-                window->resize_width   = window->width;
-                window->resize_height  = window->height;
-                window->resize_pending = false;
+    return info->name;
+}
 
-            }
-            else {
+bool lv_wayland_get_output_size(uint8_t output, int32_t * width, int32_t * height)
+{
+    LV_CHECK_ARG_FORMAT_MSG(output < lv_wl_ctx.wl_output_count, return false,
+                            "Invalid output '%d'. Expected '0'..'%d'",
+                            output, lv_wl_ctx.wl_output_count - 1);
 
-                LV_LOG_TRACE("Failed to resize window frame: %d", window->frame_counter);
-            }
-        }
-        else if(window->shall_close == true) {
+    const lv_wl_output_info_t * info = lv_wl_ctx.physical_outputs[output];
 
-            /* Destroy graphical context and execute close_cb */
-            handle_output();
-            lv_wayland_deinit();
-            return 0;
-        }
+    int32_t w, h;
+    /* Prefer the logical size over the screen resolution */
+    if(info->logical_width > 0 && info->logical_height > 0) {
+        w = info->logical_width;
+        h = info->logical_height;
+    }
+    else {
+        w = info->width;
+        h = info->height;
     }
 
-    /* LVGL handling */
-    uint32_t idle_time = lv_timer_handler();
+    if(width) {
+        *width = w;
+    }
+    if(height) {
+        *height = h;
+    }
+    return w > 0 && h > 0;
+}
 
-    /* Wayland output handling */
-    handle_output();
+int32_t lv_wayland_get_display_size(const char * name, int32_t * width, int32_t * height)
+{
+    LV_CHECK_ARG(name != NULL, return -1);
 
-    /* Set 'errno' if a Wayland flush is outstanding (i.e. data still needs to
-     * be sent to the compositor, but the compositor pipe/connection is unable
-     * to take more data at this time).
-     */
-    LV_LL_READ(&lv_wl_ctx.window_ll, window) {
-        if(window->flush_pending) {
-            errno = EAGAIN;
-            break;
+    for(uint8_t i = 0; i < lv_wl_ctx.wl_output_count; i++) {
+        const char * output_name = lv_wayland_get_output_name(i);
+        if(output_name == NULL || strcmp(name, output_name) != 0) {
+            continue;
         }
+        lv_wayland_get_output_size(i, width, height);
+        return i;
     }
 
-    return idle_time;
+    LV_LOG_WARN("No output named '%s'", name);
+    return -1;
 }
 
 /**********************
  *   PRIVATE FUNCTIONS
  **********************/
 
-void lv_wayland_init(void)
+lv_result_t lv_wayland_init(void)
 {
 
     if(is_wayland_initialized) {
-        return;
+        return LV_RESULT_OK;
     }
+    lv_memset(&lv_wl_ctx, 0, sizeof(lv_wl_ctx));
 
-    // Create XKB context
-    lv_wl_ctx.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    LV_ASSERT_MSG(lv_wl_ctx.xkb_context, "failed to create XKB context");
-    if(lv_wl_ctx.xkb_context == NULL) {
-        return;
+    /* Connect to Wayland display */
+    lv_wl_ctx.wl_display = wl_display_connect(NULL);
+    if(!lv_wl_ctx.wl_display) {
+        LV_LOG_ERROR("failed to connect to Wayland server");
+        return LV_RESULT_INVALID;
     }
-
-    // Connect to Wayland display
-    lv_wl_ctx.display = wl_display_connect(NULL);
-    LV_ASSERT_MSG(lv_wl_ctx.display, "failed to connect to Wayland server");
-    if(lv_wl_ctx.display == NULL) {
-        return;
-    }
-
-#if LV_WAYLAND_USE_DMABUF
-    lv_wayland_dmabuf_initalize_context(&lv_wl_ctx.dmabuf_ctx);
-#endif
-    lv_wayland_shm_initalize_context(&lv_wl_ctx.shm_ctx);
+    lv_wayland_backend_init_all();
 
     /* Add registry listener and wait for registry reception */
-    lv_wl_ctx.registry = wl_display_get_registry(lv_wl_ctx.display);
-    wl_registry_add_listener(lv_wl_ctx.registry, &registry_listener, &lv_wl_ctx);
-    wl_display_dispatch(lv_wl_ctx.display);
-    wl_display_roundtrip(lv_wl_ctx.display);
+    lv_wl_ctx.wl_registry = wl_display_get_registry(lv_wl_ctx.wl_display);
+    wl_registry_add_listener(lv_wl_ctx.wl_registry, &registry_listener, &lv_wl_ctx);
+    wl_display_dispatch(lv_wl_ctx.wl_display);
+    wl_display_roundtrip(lv_wl_ctx.wl_display);
 
-    LV_ASSERT_MSG(lv_wl_ctx.compositor, "Wayland compositor not available");
-    if(lv_wl_ctx.compositor == NULL) {
-        return;
+    LV_ASSERT_MSG(lv_wl_ctx.wl_compositor, "Wayland compositor not available");
+    if(!lv_wl_ctx.wl_compositor) {
+        LV_LOG_ERROR("Wayland compositor is not available");
+        wl_display_disconnect(lv_wl_ctx.wl_display);
+        lv_wl_ctx.wl_display = NULL;
+        return LV_RESULT_INVALID;
+
     }
 
-    bool shm_ready = lv_wayland_shm_is_ready(&lv_wl_ctx.shm_ctx);
-    LV_ASSERT_MSG(shm_ready, "Couldn't initialize wayland SHM");
-    if(!shm_ready) {
-        LV_LOG_ERROR("Couldn't initialize wayland SHM");
-        return;
-    }
-    lv_wl_ctx.cursor_theme = lv_wayland_shm_load_cursor_theme(&lv_wl_ctx.shm_ctx);
-    if(!lv_wl_ctx.cursor_theme) {
-        LV_LOG_WARN("Failed to initialize the cursor theme");
-    }
-
-#if LV_WAYLAND_USE_DMABUF
-    bool dmabuf_ready = lv_wayland_dmabuf_is_ready(&lv_wl_ctx.dmabuf_ctx);
-    LV_ASSERT_MSG(dmabuf_ready, "Couldn't initialize wayland DMABUF");
-    if(!dmabuf_ready) {
-        LV_LOG_ERROR("Couldn't initialize wayland DMABUF");
-        return;
-    }
-#endif
-
-#ifdef LV_WAYLAND_WINDOW_DECORATIONS
-    const char * env_disable_decorations = getenv("LV_WAYLAND_DISABLE_WINDOWDECORATION");
-    lv_wl_ctx.opt_disable_decorations  = ((env_disable_decorations != NULL) && (env_disable_decorations[0] != '0'));
-#endif
-
-    lv_ll_init(&lv_wl_ctx.window_ll, sizeof(struct window));
+    lv_ll_init(&lv_wl_ctx.window_ll, sizeof(lv_wl_window_t));
 
     lv_tick_set_cb(tick_get_cb);
+    lv_wl_ctx.read_compositor_events_timer = lv_timer_create(read_compositor_events_timer_cb, LV_DEF_REFR_PERIOD, NULL);
 
-    /* Used to wait for events when the window is minimized or hidden */
-    lv_wl_ctx.wayland_pfd.fd     = wl_display_get_fd(lv_wl_ctx.display);
-    lv_wl_ctx.wayland_pfd.events = POLLIN;
+    if(lv_wl_ctx.xdg_output_mgr) {
+        for(uint8_t i = 0; i < lv_wl_ctx.wl_output_count; i++) {
+            output_bind_xdg_output(lv_wl_ctx.physical_outputs[i]);
+        }
+        /* Wait for the name and logical size of every output to arrive, so that
+         * `lv_wayland_get_display_size` can be used right after initialization */
+        wl_display_roundtrip(lv_wl_ctx.wl_display);
+    }
+    else {
+        LV_LOG_WARN("zxdg_output_manager_v1 is not available, "
+                    "outputs can't be identified by their connector name");
+    }
 
     is_wayland_initialized = true;
+    return LV_RESULT_OK;
 }
 
 void lv_wayland_deinit(void)
 {
-    struct window * window = NULL;
-
-    LV_LL_READ(&lv_wl_ctx.window_ll, window) {
-        if(!window->closed) {
-            lv_wayland_window_destroy(window);
-        }
-
-        /* TODO: This should probably be moved inside lv_wayland_window_destroy but not sure about the if condition */
-#if LV_WAYLAND_USE_DMABUF
-        lv_wayland_dmabuf_destroy_draw_buffers(&lv_wl_ctx.dmabuf_ctx, window);
-#else
-        lv_wayland_shm_delete_draw_buffers(&lv_wl_ctx.shm_ctx, window);
-#endif
-        lv_display_delete(window->lv_disp);
-    }
-
-    lv_wayland_shm_deinit(&lv_wl_ctx.shm_ctx);
-#if LV_WAYLAND_USE_DMABUF
-    lv_wayland_dmabuf_deinit(&lv_wl_ctx.dmabuf_ctx);
-#endif
-
-#if LV_WAYLAND_WL_SHELL
-    lv_wayland_wl_shell_deinit();
-#elif LV_WAYLAND_XDG_SHELL
-    lv_wayland_xdg_shell_deinit();
-#endif
-
-    if(lv_wl_ctx.wl_seat) {
-        wl_seat_destroy(lv_wl_ctx.wl_seat);
-    }
-
-    if(lv_wl_ctx.subcompositor) {
-        wl_subcompositor_destroy(lv_wl_ctx.subcompositor);
-    }
-
-    if(lv_wl_ctx.compositor) {
-        wl_compositor_destroy(lv_wl_ctx.compositor);
-    }
-
-    wl_registry_destroy(lv_wl_ctx.registry);
-    wl_display_flush(lv_wl_ctx.display);
-    wl_display_disconnect(lv_wl_ctx.display);
-
-    lv_ll_clear(&lv_wl_ctx.window_ll);
-}
-
-void lv_wayland_wait_flush_cb(lv_display_t * disp)
-{
-    struct window * window = lv_display_get_user_data(disp);
-    /* TODO: Figure out why we need this */
-    if(window->frame_counter == 0) {
+    if(!is_wayland_initialized) {
         return;
     }
-    uint32_t initial_frame_counter = window->frame_counter;
-    while(initial_frame_counter == window->frame_counter) {
-        poll(&lv_wl_ctx.wayland_pfd, 1, -1);
-        handle_input();
+
+    lv_wayland_xdg_deinit();
+
+    if(is_wayland_initialized) {
+        lv_wayland_backend_deinit_all();
     }
+
+    if(lv_wl_ctx.seat.wl_seat) {
+        lv_wayland_seat_deinit(&lv_wl_ctx.seat);
+        lv_wl_ctx.seat.wl_seat = NULL;
+    }
+
+    if(lv_wl_ctx.wl_registry) {
+        wl_registry_destroy(lv_wl_ctx.wl_registry);
+        lv_wl_ctx.wl_registry = NULL;
+    }
+
+    if(lv_wl_ctx.wl_shm) {
+        wl_shm_destroy(lv_wl_ctx.wl_shm);
+        lv_wl_ctx.wl_shm = NULL;
+    }
+
+    for(uint8_t i = 0; i < lv_wl_ctx.wl_output_count; ++i) {
+        lv_wl_output_info_t * info = lv_wl_ctx.physical_outputs[i];
+        if(info->xdg_output) {
+            zxdg_output_v1_destroy(info->xdg_output);
+        }
+        if(info->wl_output) {
+            wl_output_destroy(info->wl_output);
+        }
+        lv_free(info);
+    }
+    lv_free(lv_wl_ctx.physical_outputs);
+    lv_wl_ctx.physical_outputs = NULL;
+    lv_wl_ctx.wl_output_count = 0;
+
+    if(lv_wl_ctx.xdg_output_mgr) {
+        zxdg_output_manager_v1_destroy(lv_wl_ctx.xdg_output_mgr);
+        lv_wl_ctx.xdg_output_mgr = NULL;
+    }
+
+    if(lv_wl_ctx.wl_compositor) {
+        wl_compositor_destroy(lv_wl_ctx.wl_compositor);
+        lv_wl_ctx.wl_compositor = NULL;
+    }
+    if(lv_wl_ctx.wl_display) {
+        wl_display_disconnect(lv_wl_ctx.wl_display);
+        lv_wl_ctx.wl_display = NULL;
+    }
+
+    if(lv_wl_ctx.read_compositor_events_timer) {
+        lv_timer_delete(lv_wl_ctx.read_compositor_events_timer);
+        lv_wl_ctx.read_compositor_events_timer = NULL;
+    }
+
+    lv_ll_clear(&lv_wl_ctx.window_ll);
+    is_wayland_initialized = false;
 }
 
+void lv_wayland_flush(void)
+{
+    int ret;
+    while((ret = wl_display_flush(lv_wl_ctx.wl_display)) == -1 && errno == EAGAIN) {
+        struct pollfd pfd = {
+            .fd = wl_display_get_fd(lv_wl_ctx.wl_display),
+            .events = POLLOUT,
+        };
+
+        if(poll(&pfd, 1, -1) == -1) {
+            LV_LOG_ERROR("poll failed: %s", strerror(errno));
+            break;
+        }
+        /* Socket is writable now, loop back and try flush again */
+    }
+}
 /**********************
  *   STATIC FUNCTIONS
  **********************/
+
+static void read_compositor_events_timer_cb(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+
+    lv_wayland_flush();
+
+    while(wl_display_prepare_read(lv_wl_ctx.wl_display) != 0) {
+        wl_display_dispatch_pending(lv_wl_ctx.wl_display);
+    }
+
+    struct pollfd fds = {
+        .fd = wl_display_get_fd(lv_wl_ctx.wl_display),
+        .events = POLLIN,
+    };
+    const bool is_event_ready = poll(&fds, 1, 0) > 0;
+    if(!is_event_ready) {
+        wl_display_cancel_read(lv_wl_ctx.wl_display);
+        return;
+    }
+    wl_display_read_events(lv_wl_ctx.wl_display);
+    wl_display_dispatch_pending(lv_wl_ctx.wl_display);
+}
+
+static void output_geometry(void * data, struct wl_output * output, int32_t x, int32_t y, int32_t physical_width,
+                            int32_t physical_height,
+                            int32_t subpixel, const char * make, const char * model, int32_t transform)
+{
+    LV_UNUSED(output);
+    LV_UNUSED(x);
+    LV_UNUSED(y);
+    LV_UNUSED(physical_width);
+    LV_UNUSED(physical_height);
+    LV_UNUSED(subpixel);
+    LV_UNUSED(make);
+    LV_UNUSED(transform);
+
+    LV_UNUSED(data);
+    LV_UNUSED(model);
+}
+
+static void output_mode(void * data, struct wl_output * wl_output, uint32_t flags, int32_t width, int32_t height,
+                        int32_t refresh)
+{
+    LV_UNUSED(wl_output);
+
+    lv_wl_output_info_t * info = data;
+
+    if(flags & WL_OUTPUT_MODE_CURRENT) {
+        info->height = height;
+        info->width = width;
+        info->refresh = refresh;
+        info->flags = flags;
+    }
+}
+
+static void output_done(void * data, struct wl_output * output)
+{
+    /* Called when all geometry/mode info for this output has been sent */
+    LV_UNUSED(data);
+    LV_UNUSED(output);
+}
+
+static void output_scale(void * data, struct wl_output * output, int32_t factor)
+{
+    LV_UNUSED(output);
+    lv_wl_output_info_t * info = data;
+    info->scale = factor;
+}
+
+static void output_bind_xdg_output(lv_wl_output_info_t * info)
+{
+    if(!lv_wl_ctx.xdg_output_mgr || info->xdg_output || !info->wl_output) {
+        return;
+    }
+
+    info->xdg_output = zxdg_output_manager_v1_get_xdg_output(lv_wl_ctx.xdg_output_mgr, info->wl_output);
+    if(!info->xdg_output) {
+        LV_LOG_WARN("Failed to get the xdg_output of an output");
+        return;
+    }
+
+    zxdg_output_v1_add_listener(info->xdg_output, &xdg_output_listener, info);
+}
+
+static void xdg_output_logical_position(void * data, struct zxdg_output_v1 * xdg_output, int32_t x, int32_t y)
+{
+    LV_UNUSED(data);
+    LV_UNUSED(xdg_output);
+    LV_UNUSED(x);
+    LV_UNUSED(y);
+}
+
+static void xdg_output_logical_size(void * data, struct zxdg_output_v1 * xdg_output, int32_t width, int32_t height)
+{
+    LV_UNUSED(xdg_output);
+    lv_wl_output_info_t * info = data;
+    info->logical_width = width;
+    info->logical_height = height;
+}
+
+static void xdg_output_done(void * data, struct zxdg_output_v1 * xdg_output)
+{
+    /* Deprecated since version 3, the events above are applied immediately */
+    LV_UNUSED(data);
+    LV_UNUSED(xdg_output);
+}
+
+static void xdg_output_name(void * data, struct zxdg_output_v1 * xdg_output, const char * name)
+{
+    LV_UNUSED(xdg_output);
+    lv_wl_output_info_t * info = data;
+
+    /* Only useful below wl_output version 4, which reports the same name */
+    if(info->name[0] == '\0') {
+        snprintf(info->name, sizeof(info->name), "%s", name);
+    }
+}
+
+static void xdg_output_description(void * data, struct zxdg_output_v1 * xdg_output, const char * description)
+{
+    /* A human readable description of the output, not stored since the driver
+     * identifies outputs by their connector name */
+    LV_UNUSED(data);
+    LV_UNUSED(xdg_output);
+    LV_UNUSED(description);
+}
 
 static uint32_t tick_get_cb(void)
 {
@@ -319,120 +501,59 @@ static uint32_t tick_get_cb(void)
 static void handle_global(void * data, struct wl_registry * registry, uint32_t name, const char * interface,
                           uint32_t version)
 {
-    struct lv_wayland_context * app = data;
+    lv_wl_ctx_t * ctx = data;
 
-    LV_UNUSED(version);
     LV_UNUSED(data);
 
     if(strcmp(interface, wl_compositor_interface.name) == 0) {
-        app->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
-    }
-    else if(strcmp(interface, wl_subcompositor_interface.name) == 0) {
-        app->subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+        ctx->wl_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
     }
     else if(strcmp(interface, wl_shm_interface.name) == 0) {
-
-        lv_wayland_shm_set_interface(&app->shm_ctx, app->registry, name, interface, version);
-
+        /* Regardless of the backend, we always need SHM for the pointer cursor*/
+        ctx->wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     }
     else if(strcmp(interface, wl_seat_interface.name) == 0) {
-        app->wl_seat = wl_registry_bind(app->registry, name, &wl_seat_interface, 1);
-        wl_seat_add_listener(app->wl_seat, lv_wayland_seat_get_listener(), app);
+        lv_wayland_seat_init(&ctx->seat, registry, name, version);
     }
-#if LV_WAYLAND_WL_SHELL
-    else if(strcmp(interface, wl_shell_interface.name) == 0) {
-        app->wl_shell = wl_registry_bind(registry, name, &wl_shell_interface, 1);
-    }
-#endif
-#if LV_WAYLAND_XDG_SHELL
     else if(strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        /* supporting version 2 of the XDG protocol - ensures greater compatibility */
-        app->xdg_wm = wl_registry_bind(app->registry, name, &xdg_wm_base_interface, 2);
-        xdg_wm_base_add_listener(app->xdg_wm, lv_wayland_xdg_shell_get_wm_base_listener(), app);
+        ctx->xdg_wm = wl_registry_bind(ctx->wl_registry, name, &xdg_wm_base_interface, LV_MIN(version, 2));
+        xdg_wm_base_add_listener(ctx->xdg_wm, lv_wayland_xdg_get_wm_base_listener(), ctx);
     }
-#endif
-#if LV_WAYLAND_USE_DMABUF
-    else if(strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
-        lv_wayland_dmabuf_set_interface(&app->dmabuf_ctx, app->registry, name, interface, version);
+    else if(strcmp(interface, wl_output_interface.name) == 0) {
+        lv_wl_output_info_t ** outputs = lv_realloc(ctx->physical_outputs,
+                                                    (ctx->wl_output_count + 1) * sizeof(lv_wl_output_info_t *));
+        if(!outputs) {
+            LV_LOG_WARN("Failed to allocate memory for output");
+            return;
+        }
+        ctx->physical_outputs = outputs;
 
-        wl_display_roundtrip(app->display);
+        lv_wl_output_info_t * info = lv_zalloc(sizeof(lv_wl_output_info_t));
+        if(!info) {
+            LV_LOG_WARN("Failed to allocate memory for output");
+            return;
+        }
+
+        info->wl_output = wl_registry_bind(registry, name, &wl_output_interface,
+                                           LV_MIN(version, LV_WAYLAND_WL_OUTPUT_VERSION));
+        ctx->physical_outputs[ctx->wl_output_count] = info;
+        ctx->wl_output_count++;
+        wl_output_add_listener(info->wl_output, &output_listener, info);
+
+        output_bind_xdg_output(info);
     }
-#endif
+    else if(strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
+        ctx->xdg_output_mgr = wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface, LV_MIN(version, 3));
+    }
+
+    lv_wayland_backend_global_handler(registry, name, interface, version);
 }
 
 static void handle_global_remove(void * data, struct wl_registry * registry, uint32_t name)
 {
-
     LV_UNUSED(data);
     LV_UNUSED(registry);
     LV_UNUSED(name);
-}
-
-static void handle_input(void)
-{
-    int prepare_read = -1;
-
-    while(prepare_read != 0) {
-        wl_display_dispatch_pending(lv_wl_ctx.display);
-        prepare_read = wl_display_prepare_read(lv_wl_ctx.display);
-    }
-    wl_display_read_events(lv_wl_ctx.display);
-    wl_display_dispatch_pending(lv_wl_ctx.display);
-}
-
-static void handle_output(void)
-{
-    struct window * window;
-    bool shall_flush = lv_wl_ctx.cursor_flush_pending;
-
-    LV_LL_READ(&lv_wl_ctx.window_ll, window) {
-        if((window->shall_close) && (window->close_cb != NULL)) {
-            window->shall_close = window->close_cb(window->lv_disp);
-        }
-
-        if(window->closed) {
-            continue;
-        }
-        else if(window->shall_close) {
-            window->closed      = true;
-            window->shall_close = false;
-            shall_flush         = true;
-
-            window->body->input.pointer.x            = 0;
-            window->body->input.pointer.y            = 0;
-            window->body->input.pointer.left_button  = LV_INDEV_STATE_RELEASED;
-            window->body->input.pointer.right_button = LV_INDEV_STATE_RELEASED;
-            window->body->input.pointer.wheel_button = LV_INDEV_STATE_RELEASED;
-            window->body->input.pointer.wheel_diff   = 0;
-            if(window->wl_ctx->pointer_obj == window->body) {
-                window->wl_ctx->pointer_obj = NULL;
-            }
-
-            window->body->input.keyboard.key   = 0;
-            window->body->input.keyboard.state = LV_INDEV_STATE_RELEASED;
-            if(window->wl_ctx->keyboard_obj == window->body) {
-                window->wl_ctx->keyboard_obj = NULL;
-            }
-            lv_wayland_window_destroy(window);
-        }
-
-        shall_flush |= window->flush_pending;
-    }
-
-    if(shall_flush) {
-        if(wl_display_flush(lv_wl_ctx.display) == -1) {
-            if(errno != EAGAIN) {
-                LV_LOG_ERROR("failed to flush wayland display");
-            }
-        }
-        else {
-            /* All data flushed */
-            lv_wl_ctx.cursor_flush_pending = false;
-            LV_LL_READ(&lv_wl_ctx.window_ll, window) {
-                window->flush_pending = false;
-            }
-        }
-    }
 }
 
 #endif /* LV_USE_WAYLAND */

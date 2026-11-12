@@ -1,18 +1,17 @@
 /**
- * @file lv_calendar_obj_dropdown.c
+ * @file lv_calendar_header_dropdown.c
  *
  */
 
 /*********************
  *      INCLUDES
  *********************/
-#include "../../core/lv_obj_class_private.h"
-#include "lv_calendar_header_dropdown.h"
+
+#include "lv_calendar_private.h"
+
 #if LV_USE_CALENDAR && LV_USE_CALENDAR_HEADER_DROPDOWN
 
-#include "lv_calendar.h"
-#include "../dropdown/lv_dropdown.h"
-#include "../../layouts/flex/lv_flex.h"
+#include "../../core/lv_obj_class_private.h"
 
 /*********************
  *      DEFINES
@@ -44,7 +43,7 @@ const lv_obj_class_t lv_calendar_header_dropdown_class = {
 
 static const char * month_list = "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12";
 static const char * year_list = {
-    "2025\n2024\n2023\n2022\n2021\n"
+    "2026\n2025\n2024\n2023\n2022\n2021\n"
     "2020\n2019\n2018\n2017\n2016\n2015\n2014\n2013\n2012\n2011\n2010\n2009\n2008\n2007\n2006\n2005\n2004\n2003\n2002\n2001\n"
     "2000\n1999\n1998\n1997\n1996\n1995\n1994\n1993\n1992\n1991\n1990\n1989\n1988\n1987\n1986\n1985\n1984\n1983\n1982\n1981\n"
     "1980\n1979\n1978\n1977\n1976\n1975\n1974\n1973\n1972\n1971\n1970\n1969\n1968\n1967\n1966\n1965\n1964\n1963\n1962\n1961\n"
@@ -63,6 +62,8 @@ static const char * year_list = {
 
 lv_obj_t * lv_calendar_add_header_dropdown(lv_obj_t * parent)
 {
+    LV_CHECK_OBJ(parent, &lv_calendar_class, return NULL);
+
     lv_obj_t * obj = lv_obj_class_create_obj(&lv_calendar_header_dropdown_class, parent);
     lv_obj_class_init_obj(obj);
 
@@ -71,6 +72,9 @@ lv_obj_t * lv_calendar_add_header_dropdown(lv_obj_t * parent)
 
 void lv_calendar_header_dropdown_set_year_list(lv_obj_t * parent, const char * years_list)
 {
+    LV_CHECK_OBJ(parent, &lv_calendar_class, return);
+    LV_CHECK_ARG(years_list != NULL, return);
+
     /* Search for the header dropdown */
     lv_obj_t * header = lv_obj_get_child_by_type(parent, 0, &lv_calendar_header_dropdown_class);
     if(NULL == header) {
@@ -103,8 +107,10 @@ static void my_constructor(const lv_obj_class_t * class_p, lv_obj_t * obj)
     LV_TRACE_OBJ_CREATE("begin");
 
     LV_UNUSED(class_p);
+    LV_ASSERT(obj != NULL);
 
     lv_obj_t * calendar = lv_obj_get_parent(obj);
+    LV_ASSERT(calendar != NULL);
     lv_obj_move_to_index(obj, 0);
     lv_obj_set_flex_flow(obj, LV_FLEX_FLOW_ROW);
 
@@ -119,14 +125,18 @@ static void my_constructor(const lv_obj_class_t * class_p, lv_obj_t * obj)
     lv_obj_set_flex_grow(month_dd, 1);
 
     lv_obj_add_event_cb(obj, value_changed_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    /*Refresh the drop downs*/
+
+    /*Refresh the drop down*/
     lv_obj_send_event(obj, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
 static void month_event_cb(lv_event_t * e)
 {
+    LV_ASSERT(e != NULL);
     lv_obj_t * dropdown = lv_event_get_current_target(e);
     lv_obj_t * calendar = lv_event_get_user_data(e);
+    LV_ASSERT(dropdown != NULL);
+    LV_ASSERT(calendar != NULL);
 
     uint32_t sel = lv_dropdown_get_selected(dropdown);
 
@@ -140,8 +150,11 @@ static void month_event_cb(lv_event_t * e)
 
 static void year_event_cb(lv_event_t * e)
 {
+    LV_ASSERT(e != NULL);
     lv_obj_t * dropdown = lv_event_get_current_target(e);
     lv_obj_t * calendar = lv_event_get_user_data(e);
+    LV_ASSERT(dropdown != NULL);
+    LV_ASSERT(calendar != NULL);
 
     uint32_t sel = lv_dropdown_get_selected(dropdown);
 
@@ -165,8 +178,11 @@ static void year_event_cb(lv_event_t * e)
 
 static void value_changed_event_cb(lv_event_t * e)
 {
+    LV_ASSERT(e != NULL);
     lv_obj_t * header = lv_event_get_current_target(e);
+    LV_ASSERT(header != NULL);
     lv_obj_t * calendar = lv_obj_get_parent(header);
+    LV_ASSERT(calendar != NULL);
     const lv_calendar_date_t * cur_date = lv_calendar_get_showed_date(calendar);
     lv_obj_t * year_dd = lv_obj_get_child(header, 0);
     lv_obj_t * month_dd = lv_obj_get_child(header, 1);

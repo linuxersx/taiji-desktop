@@ -6,8 +6,8 @@ later. See `LICENSE`.
 
 Copyright (C) 2026 the Taiji Desktop project authors.
 
-## LVGL 9.3
-`third_party/lvgl` contains a trimmed copy of the LVGL source tree.
+## LVGL 9.6
+`third_party/lvgl` contains a trimmed copy of the LVGL 9.6.0 source tree (public `include/` + private `src/`).
 LVGL is licensed under the MIT License. See `third_party/lvgl/LICENCE.txt`.
 
 ## ZCOOL QingKe HuangYou

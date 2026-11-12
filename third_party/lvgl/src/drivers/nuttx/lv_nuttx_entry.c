@@ -1,26 +1,35 @@
 /**
- * @file lv_nuttx_entry.h
+ * @file lv_nuttx_entry.c
  *
  */
 
 /*********************
  *      INCLUDES
  *********************/
-#include "lv_nuttx_entry.h"
+#include "../../lvgl_public.h"
 
 #if LV_USE_NUTTX
 
 #include <time.h>
-#include <nuttx/tls.h>
-#include <nuttx/clock.h>
 #include <syslog.h>
 #include <pthread.h>
+#include <unistd.h>
 #include "lv_nuttx_cache.h"
 #include "lv_nuttx_image_cache.h"
 #include "../../core/lv_global.h"
 #include "lv_nuttx_profiler.h"
+#include "lv_nuttx_mouse.h"
 
-#include "../../../lvgl.h"
+#if LV_USE_NUTTX_LIBUV
+    #include <uv.h>
+#endif
+
+#ifdef __NuttX__
+    #include <nuttx/tls.h>
+    #include <nuttx/clock.h>
+#else
+    #include "mock/nuttx_clock.h"
+#endif
 
 /*********************
  *      DEFINES
@@ -48,7 +57,7 @@ static uint32_t millis(void);
 #endif
 static void check_stack_size(void);
 
-#ifdef CONFIG_LV_USE_NUTTX_LIBUV
+#if LV_USE_NUTTX_LIBUV
     static void lv_nuttx_uv_loop(lv_nuttx_result_t * result);
 #endif
 
@@ -96,6 +105,7 @@ lv_global_t * lv_global_default(void)
 
 void lv_nuttx_dsc_init(lv_nuttx_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
     if(dsc == NULL)
         return;
 
@@ -106,10 +116,19 @@ void lv_nuttx_dsc_init(lv_nuttx_dsc_t * dsc)
 #ifdef CONFIG_UINPUT_TOUCH
     dsc->utouch_path = "/dev/utouch";
 #endif
+
+#if LV_USE_NUTTX_MOUSE
+    dsc->mouse_path = "/dev/mouse0";
+#endif
+
+#if LV_USE_NUTTX_TRACE_FILE
+    dsc->trace_path = LV_NUTTX_TRACE_FILE_PATH;
+#endif
 }
 
 void lv_nuttx_init(const lv_nuttx_dsc_t * dsc, lv_nuttx_result_t * result)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
     nuttx_ctx_p = lv_malloc_zeroed(sizeof(lv_nuttx_ctx_t));
     LV_ASSERT_MALLOC(nuttx_ctx_p);
 
@@ -126,6 +145,9 @@ void lv_nuttx_init(const lv_nuttx_dsc_t * dsc, lv_nuttx_result_t * result)
 
 #if LV_USE_PROFILER && LV_USE_PROFILER_BUILTIN
     lv_nuttx_profiler_init();
+#if LV_USE_NUTTX_TRACE_FILE
+    lv_nuttx_profiler_set_file(dsc->trace_path);
+#endif
 #endif
 
     if(result) {
@@ -167,6 +189,15 @@ void lv_nuttx_init(const lv_nuttx_dsc_t * dsc, lv_nuttx_result_t * result)
             }
         }
 #endif
+
+#if LV_USE_NUTTX_MOUSE
+        if(dsc->mouse_path) {
+            lv_indev_t * indev = lv_nuttx_mouse_create(dsc->mouse_path);
+            if(result) {
+                result->mouse_indev = indev;
+            }
+        }
+#endif
     }
 
 #else
@@ -177,9 +208,11 @@ void lv_nuttx_init(const lv_nuttx_dsc_t * dsc, lv_nuttx_result_t * result)
 
 void lv_nuttx_run(lv_nuttx_result_t * result)
 {
-#ifdef CONFIG_LV_USE_NUTTX_LIBUV
-    lv_nuttx_uv_loop(&ui_loop, result);
+#if LV_USE_NUTTX_LIBUV
+    LV_CHECK_ARG(result != NULL, return);
+    lv_nuttx_uv_loop(result);
 #else
+    LV_UNUSED(result);
     while(1) {
         uint32_t idle;
         idle = lv_timer_handler();
@@ -240,6 +273,9 @@ void lv_nuttx_deinit(lv_nuttx_result_t * result)
         lv_nuttx_cache_deinit();
         lv_nuttx_image_cache_deinit();
 
+#if LV_USE_PROFILER && LV_USE_PROFILER_BUILTIN
+        lv_nuttx_profiler_deinit();
+#endif
         lv_free(nuttx_ctx_p);
         nuttx_ctx_p = NULL;
     }
@@ -270,7 +306,7 @@ static void syslog_print(lv_log_level_t level, const char * buf)
 }
 #endif
 
-#ifdef CONFIG_LV_USE_NUTTX_LIBUV
+#if LV_USE_NUTTX_LIBUV
 static void lv_nuttx_uv_loop(lv_nuttx_result_t * result)
 {
     uv_loop_t loop;
@@ -288,7 +324,7 @@ static void lv_nuttx_uv_loop(lv_nuttx_result_t * result)
 #endif
 
     data = lv_nuttx_uv_init(&uv_info);
-    uv_run(loop, UV_RUN_DEFAULT);
+    uv_run(&loop, UV_RUN_DEFAULT);
     lv_nuttx_uv_deinit(&data);
 }
 #endif

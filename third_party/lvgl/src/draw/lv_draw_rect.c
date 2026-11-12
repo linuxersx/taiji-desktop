@@ -6,12 +6,9 @@
 /*********************
  *      INCLUDES
  *********************/
-#include "lv_draw_rect_private.h"
+
 #include "lv_draw_private.h"
-#include "../core/lv_obj.h"
-#include "../misc/lv_assert.h"
-#include "../core/lv_obj_event.h"
-#include "../stdlib/lv_string.h"
+#include "../misc/lv_text_private.h"
 
 /*********************
  *      DEFINES
@@ -39,6 +36,8 @@
 
 void LV_ATTRIBUTE_FAST_MEM lv_draw_rect_dsc_init(lv_draw_rect_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
+
     lv_memzero(dsc, sizeof(lv_draw_rect_dsc_t));
     dsc->bg_color = lv_color_white();
     dsc->bg_grad.stops[0].color = lv_color_white();
@@ -54,10 +53,13 @@ void LV_ATTRIBUTE_FAST_MEM lv_draw_rect_dsc_init(lv_draw_rect_dsc_t * dsc)
     dsc->border_opa = LV_OPA_COVER;
     dsc->shadow_opa = LV_OPA_COVER;
     dsc->border_side = LV_BORDER_SIDE_FULL;
+    dsc->base.dsc_size = sizeof(lv_draw_rect_dsc_t);
 }
 
 void lv_draw_fill_dsc_init(lv_draw_fill_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
+
     lv_memzero(dsc, sizeof(*dsc));
     dsc->opa = LV_OPA_COVER;
     dsc->base.dsc_size = sizeof(lv_draw_fill_dsc_t);
@@ -65,14 +67,30 @@ void lv_draw_fill_dsc_init(lv_draw_fill_dsc_t * dsc)
 
 lv_draw_fill_dsc_t * lv_draw_task_get_fill_dsc(lv_draw_task_t * task)
 {
+    LV_CHECK_ARG(task != NULL, return NULL);
+
     return task->type == LV_DRAW_TASK_TYPE_FILL ? (lv_draw_fill_dsc_t *)task->draw_dsc : NULL;
 }
 
 void lv_draw_fill(lv_layer_t * layer, const lv_draw_fill_dsc_t * dsc, const lv_area_t * coords)
 {
+    LV_CHECK_ARG(layer != NULL, return);
+    LV_CHECK_ARG(dsc != NULL, return);
+    LV_CHECK_ARG(coords != NULL, return);
+
     if(dsc->opa <= LV_OPA_MIN) return;
 
     LV_PROFILER_DRAW_BEGIN;
+
+    if(dsc->base.drop_shadow_opa) {
+        lv_layer_t * ds_layer = lv_draw_layer_create_drop_shadow(layer, &dsc->base, coords);
+        LV_ASSERT_NULL(ds_layer);
+        lv_draw_fill_dsc_t ds_dsc = *dsc;
+        ds_dsc.base.drop_shadow_opa = 0; /*Disable drop shadow so rendering below will render plain fill*/
+        lv_draw_fill(ds_layer, &ds_dsc, coords);
+        lv_draw_layer_finish_drop_shadow(ds_layer, &dsc->base);
+    }
+
     lv_draw_task_t * t = lv_draw_add_task(layer, coords, LV_DRAW_TASK_TYPE_FILL);
 
     lv_memcpy(t->draw_dsc, dsc, sizeof(*dsc));
@@ -83,6 +101,8 @@ void lv_draw_fill(lv_layer_t * layer, const lv_draw_fill_dsc_t * dsc, const lv_a
 
 void lv_draw_border_dsc_init(lv_draw_border_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
+
     lv_memzero(dsc, sizeof(*dsc));
     dsc->opa = LV_OPA_COVER;
     dsc->side = LV_BORDER_SIDE_FULL;
@@ -91,14 +111,30 @@ void lv_draw_border_dsc_init(lv_draw_border_dsc_t * dsc)
 
 lv_draw_border_dsc_t * lv_draw_task_get_border_dsc(lv_draw_task_t * task)
 {
+    LV_CHECK_ARG(task != NULL, return NULL);
+
     return task->type == LV_DRAW_TASK_TYPE_BORDER ? (lv_draw_border_dsc_t *)task->draw_dsc : NULL;
 }
 
 void lv_draw_border(lv_layer_t * layer, const lv_draw_border_dsc_t * dsc, const lv_area_t * coords)
 {
+    LV_CHECK_ARG(layer != NULL, return);
+    LV_CHECK_ARG(dsc != NULL, return);
+    LV_CHECK_ARG(coords != NULL, return);
+
     if(dsc->opa <= LV_OPA_MIN) return;
 
     LV_PROFILER_DRAW_BEGIN;
+
+    if(dsc->base.drop_shadow_opa) {
+        lv_layer_t * ds_layer = lv_draw_layer_create_drop_shadow(layer, &dsc->base, coords);
+        LV_ASSERT_NULL(ds_layer);
+        lv_draw_border_dsc_t ds_dsc = *dsc;
+        ds_dsc.base.drop_shadow_opa = 0; /*Disable drop shadow so rendering below will render plain border*/
+        lv_draw_border(ds_layer, &ds_dsc, coords);
+        lv_draw_layer_finish_drop_shadow(ds_layer, &dsc->base);
+    }
+
     lv_draw_task_t * t = lv_draw_add_task(layer, coords, LV_DRAW_TASK_TYPE_BORDER);
 
     lv_memcpy(t->draw_dsc, dsc, sizeof(*dsc));
@@ -109,6 +145,8 @@ void lv_draw_border(lv_layer_t * layer, const lv_draw_border_dsc_t * dsc, const 
 
 void lv_draw_box_shadow_dsc_init(lv_draw_box_shadow_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
+
     lv_memzero(dsc, sizeof(*dsc));
     dsc->opa = LV_OPA_COVER;
     dsc->base.dsc_size = sizeof(lv_draw_box_shadow_dsc_t);
@@ -116,11 +154,17 @@ void lv_draw_box_shadow_dsc_init(lv_draw_box_shadow_dsc_t * dsc)
 
 lv_draw_box_shadow_dsc_t * lv_draw_task_get_box_shadow_dsc(lv_draw_task_t * task)
 {
+    LV_CHECK_ARG(task != NULL, return NULL);
+
     return task->type == LV_DRAW_TASK_TYPE_BOX_SHADOW ? (lv_draw_box_shadow_dsc_t *)task->draw_dsc : NULL;
 }
 
 void lv_draw_box_shadow(lv_layer_t * layer, const lv_draw_box_shadow_dsc_t * dsc, const lv_area_t * coords)
 {
+    LV_CHECK_ARG(layer != NULL, return);
+    LV_CHECK_ARG(dsc != NULL, return);
+    LV_CHECK_ARG(coords != NULL, return);
+
     if(dsc->opa <= LV_OPA_MIN) return;
 
     LV_PROFILER_DRAW_BEGIN;
@@ -134,8 +178,12 @@ void lv_draw_box_shadow(lv_layer_t * layer, const lv_draw_box_shadow_dsc_t * dsc
 
 void lv_draw_rect(lv_layer_t * layer, const lv_draw_rect_dsc_t * dsc, const lv_area_t * coords)
 {
+    LV_CHECK_ARG(layer != NULL, return);
+    LV_CHECK_ARG(dsc != NULL, return);
+    LV_CHECK_ARG(coords != NULL, return);
 
     LV_PROFILER_DRAW_BEGIN;
+
     bool has_shadow;
     bool has_fill;
     bool has_border;
@@ -177,6 +225,16 @@ void lv_draw_rect(lv_layer_t * layer, const lv_draw_rect_dsc_t * dsc, const lv_a
                 break;
             }
         }
+    }
+
+    if(dsc->base.drop_shadow_opa && (has_fill || has_outline)) {
+        lv_layer_t * ds_layer = lv_draw_layer_create_drop_shadow(layer, &dsc->base, coords);
+        LV_ASSERT_NULL(ds_layer);
+        lv_draw_rect_dsc_t ds_dsc = *dsc;
+        ds_dsc.base.drop_shadow_opa = 0; /*Disable drop shadow so rendering below will render plain shadow*/
+        ds_dsc.shadow_opa = 0;
+        lv_draw_rect(ds_layer, &ds_dsc, coords);
+        lv_draw_layer_finish_drop_shadow(ds_layer, &dsc->base);
     }
 
     lv_draw_task_t * t;
@@ -266,6 +324,7 @@ void lv_draw_rect(lv_layer_t * layer, const lv_draw_rect_dsc_t * dsc, const lv_a
                 bg_image_dsc->recolor = dsc->bg_image_recolor;
                 bg_image_dsc->recolor_opa = dsc->bg_image_recolor_opa;
                 bg_image_dsc->tile = dsc->bg_image_tiled;
+                bg_image_dsc->colorkey = dsc->bg_image_colorkey;
                 bg_image_dsc->header = header;
                 bg_image_dsc->clip_radius = dsc->radius;
                 bg_image_dsc->image_area = *coords;
@@ -273,7 +332,14 @@ void lv_draw_rect(lv_layer_t * layer, const lv_draw_rect_dsc_t * dsc, const lv_a
             }
             else {
                 lv_point_t s;
-                lv_text_get_size(&s, dsc->bg_image_src, dsc->bg_image_symbol_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+
+                lv_text_attributes_t attributes = {0};
+                attributes.text_flags = LV_TEXT_FLAG_NONE;
+                attributes.max_width = LV_COORD_MAX;
+                attributes.line_space = 0;
+                attributes.letter_space = 0;
+
+                lv_text_get_size_attributes(&s, dsc->bg_image_src, dsc->bg_image_symbol_font, &attributes);
 
                 lv_area_t a = {0, 0, s.x - 1, s.y - 1};
                 lv_area_align(coords, &a, LV_ALIGN_CENTER, 0, 0);

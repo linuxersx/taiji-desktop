@@ -13,7 +13,6 @@
 
 #include "lv_draw_vg_lite_type.h"
 #include "lv_vg_lite_math.h"
-#include <float.h>
 
 /*********************
  *      DEFINES
@@ -91,14 +90,16 @@ lv_vg_lite_path_t * lv_vg_lite_path_create(vg_lite_format_t data_format)
     lv_vg_lite_path_t * path = lv_malloc_zeroed(sizeof(lv_vg_lite_path_t));
     LV_ASSERT_MALLOC(path);
     path->format_len = lv_vg_lite_path_format_len(data_format);
-    LV_ASSERT(vg_lite_init_path(
-                  &path->base,
-                  data_format,
-                  VG_LITE_HIGH,
-                  0,
-                  NULL,
-                  0, 0, 0, 0)
-              == VG_LITE_SUCCESS);
+
+    vg_lite_error_t init_err = vg_lite_init_path(
+                                   &path->base,
+                                   data_format,
+                                   VG_LITE_HIGH,
+                                   0,
+                                   NULL,
+                                   0, 0, 0, 0);
+    LV_ASSERT(init_err == VG_LITE_SUCCESS);
+    LV_UNUSED(init_err);
     LV_PROFILER_DRAW_END;
     return path;
 }
@@ -228,8 +229,8 @@ bool lv_vg_lite_path_update_bounding_box(lv_vg_lite_path_t * path)
     /* init bounds */
     bounds.min_x = FLT_MAX;
     bounds.min_y = FLT_MAX;
-    bounds.max_x = FLT_MIN;
-    bounds.max_y = FLT_MIN;
+    bounds.max_x = -FLT_MAX;
+    bounds.max_y = -FLT_MAX;
 
     /* calc bounds */
     lv_vg_lite_path_for_each_data(lv_vg_lite_path_get_path(path), path_bounds_iter_cb, &bounds);
@@ -323,6 +324,15 @@ static inline void lv_vg_lite_path_append_point(lv_vg_lite_path_t * path, float 
         float ori_y = y;
         x = ori_x * path->matrix.m[0][0] + ori_y * path->matrix.m[0][1] + path->matrix.m[0][2];
         y = ori_x * path->matrix.m[1][0] + ori_y * path->matrix.m[1][1] + path->matrix.m[1][2];
+
+        /* perspective division, the matrix is not affine */
+        if(lv_vg_lite_matrix_has_perspective(&path->matrix)) {
+            float w = ori_x * path->matrix.m[2][0] + ori_y * path->matrix.m[2][1] + path->matrix.m[2][2];
+            if(w != 0.0f) {
+                x /= w;
+                y /= w;
+            }
+        }
     }
 
 #define PATH_APPEND_POINT_DATA(X, Y, TYPE)       \
@@ -398,8 +408,12 @@ void lv_vg_lite_path_cubic_to(lv_vg_lite_path_t * path,
 void lv_vg_lite_path_close(lv_vg_lite_path_t * path)
 {
     LV_ASSERT_NULL(path);
+#if LV_VG_LITE_DISABLE_VLC_OP_CLOSE
+    LV_UNUSED(path);
+#else
     lv_vg_lite_path_reserve_space(path, 1 * path->format_len);
     lv_vg_lite_path_append_op(path, VLC_OP_CLOSE);
+#endif
 }
 
 void lv_vg_lite_path_end(lv_vg_lite_path_t * path)
@@ -643,6 +657,7 @@ void lv_vg_lite_path_for_each_data(const vg_lite_path_t * path, lv_vg_lite_path_
 {
     LV_ASSERT_NULL(path);
     LV_ASSERT_NULL(cb);
+    LV_PROFILER_DRAW_BEGIN;
 
     uint8_t fmt_len = lv_vg_lite_path_format_len(path->format);
     uint8_t * cur = path->path;
@@ -684,6 +699,8 @@ void lv_vg_lite_path_for_each_data(const vg_lite_path_t * path, lv_vg_lite_path_
 
         cb(user_data, op_code, tmp_data, arg_len);
     }
+
+    LV_PROFILER_DRAW_END;
 }
 
 void lv_vg_lite_path_append_path(lv_vg_lite_path_t * dest, const lv_vg_lite_path_t * src)

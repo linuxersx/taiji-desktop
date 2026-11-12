@@ -7,7 +7,7 @@
  *      INCLUDES
  *********************/
 
-#include "lv_nuttx_touchscreen.h"
+#include "../../lvgl_public.h"
 
 #if LV_USE_NUTTX
 
@@ -17,11 +17,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <debug.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <nuttx/input/touchscreen.h>
 #include "../../lvgl_private.h"
+
+#ifdef __NuttX__
+    #include <debug.h>
+    #include <nuttx/input/touchscreen.h>
+#else
+    #include "mock/nuttx_input_touchscreen.h"
+#endif
 
 /*********************
  *      DEFINES
@@ -65,7 +70,7 @@ lv_indev_t * lv_nuttx_touchscreen_create(const char * dev_path)
     lv_indev_t * indev;
     int fd;
 
-    LV_ASSERT_NULL(dev_path);
+    LV_CHECK_ARG(dev_path != NULL, return NULL);
     LV_LOG_USER("touchscreen %s opening", dev_path);
     fd = open(dev_path, O_RDONLY | O_NONBLOCK);
     if(fd < 0) {

@@ -27,7 +27,7 @@
  *====================*/
 
 /** Color depth: 1 (I1), 8 (L8), 16 (RGB565), 24 (RGB888), 32 (XRGB8888) */
-#define LV_COLOR_DEPTH 32
+#define LV_COLOR_FORMAT_DEFAULT LV_COLOR_FORMAT_ARGB8888
 
 /*=========================
    STDLIB WRAPPER SETTINGS
@@ -218,7 +218,11 @@
         #define LV_DRAW_SW_CIRCLE_CACHE_SIZE 4
     #endif
 
-    #define  LV_USE_DRAW_SW_ASM     LV_DRAW_SW_ASM_NONE
+    #if defined(__ARM_NEON) || defined(__aarch64__) || defined(__arm64__)
+        #define  LV_USE_DRAW_SW_ASM     LV_DRAW_SW_ASM_NEON
+    #else
+        #define  LV_USE_DRAW_SW_ASM     LV_DRAW_SW_ASM_NONE
+    #endif
 
     #if LV_USE_DRAW_SW_ASM == LV_DRAW_SW_ASM_CUSTOM
         #define  LV_DRAW_SW_ASM_CUSTOM_INCLUDE ""

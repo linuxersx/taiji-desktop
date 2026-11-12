@@ -5,10 +5,10 @@
 /*********************
  *      INCLUDES
  *********************/
-#include "../lv_mem.h"
+#include "../../lvgl_public.h"
 #if LV_USE_UEFI
 #if LV_UEFI_USE_MEMORY_SERVICES && LV_USE_STDLIB_MALLOC == LV_STDLIB_CUSTOM
-#include "../drivers/uefi/lv_uefi_private.h"
+#include "../../drivers/uefi/lv_uefi_private.h"
 
 /*********************
  *      DEFINES
@@ -40,7 +40,7 @@ typedef struct _mem_header_t {
 
 void lv_mem_init(void)
 {
-    LV_ASSERT_NULL(gLvEfiBS);
+    LV_ASSERT(gLvEfiBS != NULL);
 
     return; /*Nothing to init*/
 }
@@ -75,7 +75,7 @@ void * lv_realloc_core(void * p, size_t new_size)
     p_address -= sizeof(mem_header_t);
     p_header = (mem_header_t *) p_address;
 
-    // UEFI supportes no realloc, if the size grows a new memory block has to be allocated
+    // UEFI supports no realloc, if the size grows a new memory block has to be allocated
     if(p_header->size > new_size) return p;
 
     p_new = lv_malloc_core(new_size);

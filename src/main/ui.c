@@ -287,6 +287,26 @@ int ui_min(int a, int b) { return a < b ? a : b; }
 int ui_scale_x(int v) { return sxv(v); }
 void ui_set_draw_scale(float scale) { g_sx = scale; g_sy = scale; }
 int ui_scale_y(int v) { return syv(v); }
+int ui_text_width(const char *text, size_t len, const lv_font_t *font,
+                  int32_t letter_space)
+{
+    if (!text || !font) return 0;
+    if (len == 0) len = strlen(text);
+    char stack[512];
+    char *buf = stack;
+    if (len + 1 > sizeof(stack)) {
+        buf = xmalloc(len + 1);
+        if (!buf) return 0;
+    }
+    memcpy(buf, text, len);
+    buf[len] = '\0';
+    lv_point_t size;
+    lv_text_get_size(&size, buf, font, letter_space, 0, LV_COORD_MAX,
+                     LV_TEXT_FLAG_NONE);
+    if (buf != stack) free(buf);
+    return size.x;
+}
+
 int ui_text_height(lv_font_t *font) {
     return ui_unscale_y(lv_font_get_line_height(font)) + 2;
 }
@@ -472,9 +492,9 @@ static lv_obj_t *nav_item(App *app, lv_obj_t *parent, int x, const char *icon,
 static int nav_item_width(const char *icon, const char *label)
 {
     lv_font_t *font = FONT_SM;
-    int need = lv_text_get_width(icon, (uint32_t)strlen(icon), font, 0) +
-               lv_text_get_width(" ", 1, font, 0) +
-               lv_text_get_width(label, (uint32_t)strlen(label), font, 0) +
+    int need = ui_text_width(icon, (uint32_t)strlen(icon), font, 0) +
+               ui_text_width(" ", 1, font, 0) +
+               ui_text_width(label, (uint32_t)strlen(label), font, 0) +
                ui_scale_x(12) + ui_scale_x(8);
     int w = ui_unscale_x(need);
     return w < 44 ? 44 : w;
@@ -670,16 +690,12 @@ void ui_topbar(App *app)
     strftime(clock, sizeof(clock), "%H:%M", &tmv);
 
     /* Measure the real labels so the pill always fits its contents. */
-    int sym_wifi = lv_text_get_width(LV_SYMBOL_WIFI,
-                                     (uint32_t)strlen(LV_SYMBOL_WIFI), status_font, 0);
-    int sym_bt = lv_text_get_width(LV_SYMBOL_BLUETOOTH,
-                                   (uint32_t)strlen(LV_SYMBOL_BLUETOOTH), status_font, 0);
+    int sym_wifi = ui_text_width(LV_SYMBOL_WIFI, (uint32_t)strlen(LV_SYMBOL_WIFI), status_font, 0);
+    int sym_bt = ui_text_width(LV_SYMBOL_BLUETOOTH, (uint32_t)strlen(LV_SYMBOL_BLUETOOTH), status_font, 0);
     int bt_gap = ui_clamp(line_h * 18 / 100, 3, 10);
-    int sym_batt = lv_text_get_width(LV_SYMBOL_BATTERY_FULL,
-                                     (uint32_t)strlen(LV_SYMBOL_BATTERY_FULL), status_font, 0);
-    int sym_vol = lv_text_get_width(LV_SYMBOL_VOLUME_MAX,
-                                    (uint32_t)strlen(LV_SYMBOL_VOLUME_MAX), status_font, 0);
-    int pct_w = lv_text_get_width("100%", 4, status_font, 0);
+    int sym_batt = ui_text_width(LV_SYMBOL_BATTERY_FULL, (uint32_t)strlen(LV_SYMBOL_BATTERY_FULL), status_font, 0);
+    int sym_vol = ui_text_width(LV_SYMBOL_VOLUME_MAX, (uint32_t)strlen(LV_SYMBOL_VOLUME_MAX), status_font, 0);
+    int pct_w = ui_text_width("100%", 4, status_font, 0);
     bool show_volume_pct = L->w >= 400;
     int padv = ui_vx(pad_x);
     int gapv = ui_vx(gap);
@@ -693,7 +709,7 @@ void ui_topbar(App *app)
     int battery_w = ui_vx(pad_x + sym_batt + batt_gap + pct_w + pad_x);
     int volume_w = ui_vx(pad_x + sym_vol +
                          (show_volume_pct ? batt_gap + pct_w : 0) + pad_x);
-    int clock_w = ui_vx(lv_text_get_width("00:00", 5, status_font, 0) + pad_x * 2);
+    int clock_w = ui_vx(ui_text_width("00:00", 5, status_font, 0) + pad_x * 2);
     int pad_w = 0, pad_icon_w = 0, pad_icon_h = 0;
     const char *pad = backend_controller_name(&app->backend);
     bool pad_connected = pad && *pad;

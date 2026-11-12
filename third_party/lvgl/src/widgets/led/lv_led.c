@@ -6,15 +6,13 @@
 /*********************
  *      INCLUDES
  *********************/
+
 #include "lv_led_private.h"
-#include "../../core/lv_obj_private.h"
-#include "../../core/lv_obj_class_private.h"
 
 #if LV_USE_LED
 
-#include "../../misc/lv_assert.h"
-#include "../../themes/lv_theme.h"
-#include "../../misc/lv_color.h"
+#include "../../core/lv_obj_private.h"
+#include "../../core/lv_obj_class_private.h"
 
 /*********************
  *      DEFINES
@@ -35,6 +33,21 @@ static void lv_led_event(const lv_obj_class_t * class_p, lv_event_t * e);
  *  STATIC VARIABLES
  **********************/
 
+#if LV_USE_OBJ_PROPERTY
+static const lv_property_ops_t lv_led_properties[] = {
+    {
+        .id = LV_PROPERTY_LED_COLOR,
+        .setter = lv_led_set_color,
+        .getter = lv_led_get_color,
+    },
+    {
+        .id = LV_PROPERTY_LED_BRIGHTNESS,
+        .setter = lv_led_set_brightness,
+        .getter = lv_led_get_brightness,
+    },
+};
+#endif
+
 const lv_obj_class_t lv_led_class  = {
     .base_class = &lv_obj_class,
     .constructor_cb = lv_led_constructor,
@@ -43,6 +56,7 @@ const lv_obj_class_t lv_led_class  = {
     .event_cb = lv_led_event,
     .instance_size = sizeof(lv_led_t),
     .name = "lv_led",
+    LV_PROPERTY_CLASS_FIELDS(led, LED)
 };
 
 /**********************
@@ -67,7 +81,7 @@ lv_obj_t * lv_led_create(lv_obj_t * parent)
 
 void lv_led_set_color(lv_obj_t * obj, lv_color_t color)
 {
-    LV_ASSERT_OBJ(obj, MY_CLASS);
+    LV_CHECK_OBJ(obj, MY_CLASS, return);
 
     lv_led_t * led = (lv_led_t *)obj;
     led->color = color;
@@ -76,7 +90,7 @@ void lv_led_set_color(lv_obj_t * obj, lv_color_t color)
 
 void lv_led_set_brightness(lv_obj_t * obj, uint8_t bright)
 {
-    LV_ASSERT_OBJ(obj, MY_CLASS);
+    LV_CHECK_OBJ(obj, MY_CLASS, return);
 
     lv_led_t * led = (lv_led_t *)obj;
     if(led->bright == bright) return;
@@ -89,16 +103,22 @@ void lv_led_set_brightness(lv_obj_t * obj, uint8_t bright)
 
 void lv_led_on(lv_obj_t * led)
 {
+    LV_CHECK_OBJ(led, MY_CLASS, return);
+
     lv_led_set_brightness(led, LV_LED_BRIGHT_MAX);
 }
 
 void lv_led_off(lv_obj_t * led)
 {
+    LV_CHECK_OBJ(led, MY_CLASS, return);
+
     lv_led_set_brightness(led, LV_LED_BRIGHT_MIN);
 }
 
 void lv_led_toggle(lv_obj_t * obj)
 {
+    LV_CHECK_OBJ(obj, MY_CLASS, return);
+
     uint8_t bright = lv_led_get_brightness(obj);
     if(bright > (LV_LED_BRIGHT_MIN + LV_LED_BRIGHT_MAX) >> 1)
         lv_led_off(obj);
@@ -112,10 +132,18 @@ void lv_led_toggle(lv_obj_t * obj)
 
 uint8_t lv_led_get_brightness(const lv_obj_t * obj)
 {
-    LV_ASSERT_OBJ(obj, MY_CLASS);
+    LV_CHECK_OBJ(obj, MY_CLASS, return 0);
 
     lv_led_t * led = (lv_led_t *)obj;
     return led->bright;
+}
+
+lv_color_t lv_led_get_color(const lv_obj_t * obj)
+{
+    LV_CHECK_OBJ(obj, MY_CLASS, return lv_color_black());
+
+    lv_led_t * led = (lv_led_t *)obj;
+    return led->color;
 }
 
 /**********************

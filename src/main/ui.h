@@ -33,6 +33,8 @@ int ui_scale_x(int v);
 void ui_set_draw_scale(float scale);
 int ui_scale_y(int v);
 int ui_text_height(lv_font_t *font);
+int ui_text_width(const char *text, size_t len, const lv_font_t *font,
+                  int32_t letter_space);
 int ui_unscale_x(int v);
 int ui_unscale_y(int v);
 

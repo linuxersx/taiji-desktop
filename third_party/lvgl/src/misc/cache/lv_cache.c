@@ -7,10 +7,7 @@
  *      INCLUDES
  *********************/
 #include "lv_cache.h"
-#include "../../stdlib/lv_sprintf.h"
-#include "../lv_assert.h"
 #include "lv_cache_entry_private.h"
-#include "lv_cache_private.h"
 
 /*********************
  *      DEFINES
@@ -319,7 +316,7 @@ static void cache_drop_internal_no_lock(lv_cache_t * cache, const void * key, vo
         lv_cache_entry_delete(entry);
     }
     else {
-        lv_cache_entry_set_invalid(entry, true);
+        lv_cache_entry_set_flag(entry, LV_CACHE_ENTRY_FLAG_INVALID);
         cache->clz->remove_cb(cache, entry, user_data);
     }
 }

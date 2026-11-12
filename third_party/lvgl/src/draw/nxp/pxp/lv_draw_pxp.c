@@ -15,14 +15,10 @@
 
 #include "lv_draw_pxp.h"
 
-#if LV_USE_PXP
-#if LV_USE_DRAW_PXP || LV_USE_ROTATE_PXP
+#if LV_USE_DRAW_PXP
 #include "lv_pxp_cfg.h"
 #include "lv_pxp_utils.h"
-
-#if LV_USE_PARALLEL_DRAW_DEBUG
-    #include "../../../core/lv_global.h"
-#endif
+#include "../../../core/lv_global.h"
 
 /*********************
  *      DEFINES
@@ -170,7 +166,6 @@ void lv_draw_pxp_rotate(const void * src_buf, void * dest_buf, int32_t src_width
 /**********************
  *   STATIC FUNCTIONS
  **********************/
-#if LV_USE_DRAW_PXP
 static inline bool _pxp_src_cf_supported(lv_color_format_t cf)
 {
     bool is_cf_supported = false;
@@ -209,11 +204,6 @@ static inline bool _pxp_dest_cf_supported(lv_color_format_t cf)
 static bool _pxp_draw_img_supported(const lv_draw_image_dsc_t * draw_dsc)
 {
     const lv_image_dsc_t * img_dsc = draw_dsc->src;
-
-    bool is_tiled = draw_dsc->tile;
-    /* Tiled image (repeat image) is currently not supported. */
-    if(is_tiled)
-        return false;
 
     bool has_recolor = (draw_dsc->recolor_opa > LV_OPA_MIN);
     bool has_transform = (draw_dsc->rotation != 0 || draw_dsc->scale_x != LV_SCALE_NONE ||
@@ -337,8 +327,10 @@ static int32_t _pxp_dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
     if(t == NULL || t->preferred_draw_unit_id != DRAW_UNIT_ID_PXP)
         return LV_DRAW_UNIT_IDLE;
 
-    if(lv_draw_layer_alloc_buf(layer) == NULL)
+    if(lv_draw_layer_alloc_buf(layer) == NULL) {
+        t->state = LV_DRAW_TASK_STATE_FAILED;
         return LV_DRAW_UNIT_IDLE;
+    }
 
     t->state = LV_DRAW_TASK_STATE_IN_PROGRESS;
     draw_pxp_unit->task_act = t;
@@ -350,7 +342,7 @@ static int32_t _pxp_dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
 #else
     _pxp_execute_drawing(draw_pxp_unit);
 
-    draw_pxp_unit->task_act->state = LV_DRAW_TASK_STATE_READY;
+    draw_pxp_unit->task_act->state = LV_DRAW_TASK_STATE_FINISHED;
     draw_pxp_unit->task_act = NULL;
 
     /* The draw unit is free now. Request a new dispatching as it can get a new task. */
@@ -434,7 +426,7 @@ static void _pxp_execute_drawing(lv_draw_pxp_unit_t * u)
         lv_draw_sw_fill((lv_draw_unit_t *)u, &rect_dsc, &draw_area);
 
         lv_point_t txt_size;
-        lv_text_get_size(&txt_size, "W", LV_FONT_DEFAULT, 0, 0, 100, LV_TEXT_FLAG_NONE);
+        lv_text_get_size_attributes(&txt_size, "W", LV_FONT_DEFAULT, 0, 0, 100, LV_TEXT_FLAG_NONE);
 
         lv_area_t txt_area;
         txt_area.x1 = draw_area.x1;
@@ -482,7 +474,7 @@ static void _pxp_render_thread_cb(void * ptr)
         _pxp_execute_drawing(u);
 
         /* Signal the ready state to dispatcher. */
-        u->task_act->state = LV_DRAW_TASK_STATE_READY;
+        u->task_act->state = LV_DRAW_TASK_STATE_FINISHED;
 
         /* Cleanup. */
         u->task_act = NULL;
@@ -495,7 +487,5 @@ static void _pxp_render_thread_cb(void * ptr)
     lv_thread_sync_delete(&u->sync);
     LV_LOG_INFO("Exit PXP draw thread.");
 }
-#endif
+#endif /*LV_USE_PXP_DRAW_THREAD*/
 #endif /*LV_USE_DRAW_PXP*/
-#endif /*LV_USE_DRAW_PXP || LV_USE_ROTATE_PXP*/
-#endif /*LV_USE_PXP*/

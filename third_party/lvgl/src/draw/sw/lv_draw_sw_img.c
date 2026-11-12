@@ -8,20 +8,14 @@
  *********************/
 #include "../../misc/lv_area_private.h"
 #include "blend/lv_draw_sw_blend_private.h"
-#include "../lv_image_decoder_private.h"
+#include "../../image/lv_image_decoder_private.h"
 #include "../lv_draw_image_private.h"
 #include "../lv_draw_private.h"
 #include "lv_draw_sw.h"
 #if LV_USE_DRAW_SW
 
-#include "../../display/lv_display.h"
 #include "../../display/lv_display_private.h"
-#include "../../misc/lv_log.h"
 #include "../../core/lv_refr_private.h"
-#include "../../stdlib/lv_mem.h"
-#include "../../misc/lv_math.h"
-#include "../../misc/lv_color.h"
-#include "../../stdlib/lv_string.h"
 #include "../../core/lv_global.h"
 
 #if LV_USE_DRAW_SW_ASM == LV_DRAW_SW_ASM_HELIUM
@@ -86,6 +80,9 @@ static void transform_and_recolor(lv_draw_task_t * t, const lv_draw_image_dsc_t 
 static void recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_buf, int32_t src_stride,
                     lv_color_format_t cf, const lv_draw_image_dsc_t * draw_dsc);
 
+static void colorkey_and_recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_buf, int32_t src_stride,
+                                 lv_color_format_t cf, const lv_draw_image_dsc_t * draw_dsc, lv_draw_sw_blend_dsc_t * blend_dsc);
+
 static bool apply_mask(const lv_draw_image_dsc_t * draw_dsc);
 
 /**********************
@@ -122,7 +119,7 @@ void lv_draw_sw_layer(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc, 
 
 #if LV_USE_LAYER_DEBUG || LV_USE_PARALLEL_DRAW_DEBUG
     lv_area_t area_rot;
-    lv_area_copy(&area_rot, coords);
+    area_rot = *coords;
     if(draw_dsc->rotation || draw_dsc->scale_x != LV_SCALE_NONE || draw_dsc->scale_y != LV_SCALE_NONE) {
         int32_t w = lv_area_get_width(coords);
         int32_t h = lv_area_get_height(coords);
@@ -175,7 +172,7 @@ void lv_draw_sw_layer(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc, 
         lv_draw_sw_border(t, &border_dsc, &area_rot);
 
         lv_point_t txt_size;
-        lv_text_get_size(&txt_size, "W", LV_FONT_DEFAULT, 0, 0, 100, LV_TEXT_FLAG_NONE);
+        lv_text_get_size_attributes(&txt_size, "W", LV_FONT_DEFAULT, 0, 0, 100, LV_TEXT_FLAG_NONE);
 
         lv_area_t txt_area;
         txt_area.x1 = draw_area.x1;
@@ -202,10 +199,10 @@ void lv_draw_sw_image(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc,
                       const lv_area_t * coords)
 {
     if(!draw_dsc->tile) {
-        lv_draw_image_normal_helper(t, draw_dsc, coords, img_draw_core);
+        lv_draw_image_normal_helper(t, draw_dsc, coords, img_draw_core, NULL);
     }
     else {
-        lv_draw_image_tiled_helper(t, draw_dsc, coords, img_draw_core);
+        lv_draw_image_tiled_helper(t, draw_dsc, coords, img_draw_core, NULL);
     }
 }
 
@@ -248,7 +245,8 @@ static void img_draw_core(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_d
         blend_dsc.blend_area = img_coords;
         lv_draw_sw_blend(t, &blend_dsc);
     }
-    else if(!transformed && !radius && cf == LV_COLOR_FORMAT_RGB565A8 && draw_dsc->recolor_opa <= LV_OPA_MIN) {
+    else if(!transformed && !radius && cf == LV_COLOR_FORMAT_RGB565A8 && draw_dsc->recolor_opa <= LV_OPA_MIN &&
+            draw_dsc->colorkey == NULL) {
         int32_t src_h = lv_area_get_height(img_coords);
         int32_t src_w = lv_area_get_width(img_coords);
         blend_dsc.src_area = img_coords;
@@ -267,7 +265,8 @@ static void img_draw_core(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_d
         blend_dsc.src_color_format = LV_COLOR_FORMAT_RGB565;
         lv_draw_sw_blend(t, &blend_dsc);
     }
-    else if(!transformed && !radius && (cf == LV_COLOR_FORMAT_L8 || cf == LV_COLOR_FORMAT_AL88)) {
+    else if(!transformed && !radius && (cf == LV_COLOR_FORMAT_L8 || cf == LV_COLOR_FORMAT_AL88) &&
+            draw_dsc->colorkey == NULL) {
         blend_dsc.src_area = img_coords;
         blend_dsc.src_buf = src_buf;
         blend_dsc.blend_area = img_coords;
@@ -275,19 +274,19 @@ static void img_draw_core(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_d
         lv_draw_sw_blend(t, &blend_dsc);
     }
     /*The simplest case just copy the pixels into the draw_buf. Blending will convert the colors if needed*/
-    else if(!transformed && !radius && draw_dsc->recolor_opa <= LV_OPA_MIN) {
+    else if(!transformed && !radius && draw_dsc->recolor_opa <= LV_OPA_MIN && draw_dsc->colorkey == NULL) {
         blend_dsc.src_area = img_coords;
         blend_dsc.src_buf = src_buf;
         blend_dsc.blend_area = img_coords;
         blend_dsc.src_color_format = cf;
         lv_draw_sw_blend(t, &blend_dsc);
     }
-    else if(!transformed && !radius && draw_dsc->recolor_opa > LV_OPA_MIN) {
+    else if(!transformed && !radius && draw_dsc->recolor_opa > LV_OPA_MIN && draw_dsc->colorkey == NULL) {
         recolor_only(t, draw_dsc, decoder_dsc, img_coords,  clipped_img_area);
     }
 #if LV_DRAW_SW_COMPLEX
     /*Handle masked RGB565, RGB888, XRGB888, or ARGB8888 images*/
-    else if(!transformed && radius && draw_dsc->recolor_opa <= LV_OPA_MIN) {
+    else if(!transformed && radius && draw_dsc->recolor_opa <= LV_OPA_MIN && draw_dsc->colorkey == NULL) {
         radius_only(t, draw_dsc, decoder_dsc, img_coords,  clipped_img_area);
     }
 #endif /*LV_DRAW_SW_COMPLEX*/
@@ -382,10 +381,12 @@ static void radius_only(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc
         blend_area.y1 ++;
         blend_area.y2 ++;
     }
+    lv_draw_sw_mask_free_param(&mask_param);
     lv_free(mask_buf);
 
 }
 #endif /*LV_DRAW_SW_COMPLEX*/
+
 static void recolor_only(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_dsc,
                          const lv_image_decoder_dsc_t * decoder_dsc,
                          const lv_area_t * img_coords, const lv_area_t * clipped_img_area)
@@ -406,8 +407,13 @@ static void recolor_only(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_ds
         buf_stride = 1;
     }
     buf_h = MAX_BUF_SIZE / buf_stride;
-    if(buf_h > blend_h) buf_h = blend_h;
+    buf_h = LV_CLAMP(1, buf_h, blend_h);
     tmp_buf = lv_malloc(buf_stride * buf_h);
+    LV_ASSERT_MALLOC(tmp_buf);
+    if(!tmp_buf) {
+        LV_LOG_WARN("Failed to perform image recolor operation. Out of memory");
+        return;
+    }
 
     lv_draw_sw_blend_dsc_t blend_dsc;
     lv_memzero(&blend_dsc, sizeof(lv_draw_sw_blend_dsc_t));
@@ -430,8 +436,9 @@ static void recolor_only(lv_draw_task_t * t, const lv_draw_image_dsc_t * draw_ds
     blend_area.y2 = blend_area.y1 + buf_h - 1;
     while(blend_area.y1 <= y_last) {
         lv_area_t relative_area;
-        lv_area_copy(&relative_area, &blend_area);
+        relative_area = blend_area;
         lv_area_move(&relative_area, -img_coords->x1, -img_coords->y1);
+
         recolor(relative_area, decoded->data, tmp_buf, img_stride, blend_dsc.src_color_format, draw_dsc);
 
         lv_draw_sw_blend(t, &blend_dsc);
@@ -476,24 +483,44 @@ static void transform_and_recolor(lv_draw_task_t * t, const lv_draw_image_dsc_t 
         do_recolor = false;
     }
 
+    bool has_colorkey = draw_dsc->colorkey != NULL;
+
     lv_color_format_t cf_final = cf;
-    if(cf_final == LV_COLOR_FORMAT_RGB888 || cf_final == LV_COLOR_FORMAT_XRGB8888) cf_final = LV_COLOR_FORMAT_ARGB8888;
+    /*RGB888/XRGB8888 gain an alpha channel: the transform fades the edge pixels. That alpha
+     *is straight, so these must not be flagged premultiplied.*/
+    if(cf_final == LV_COLOR_FORMAT_RGB888 || cf_final == LV_COLOR_FORMAT_XRGB8888) {
+        cf_final = LV_COLOR_FORMAT_ARGB8888;
+    }
     else if(cf_final == LV_COLOR_FORMAT_RGB565 ||
             cf_final == LV_COLOR_FORMAT_RGB565_SWAPPED) cf_final = LV_COLOR_FORMAT_RGB565A8;
     else if(cf_final == LV_COLOR_FORMAT_L8) cf_final = LV_COLOR_FORMAT_AL88;
+#if LV_DRAW_SW_SUPPORT_ARGB8888_PREMULTIPLIED
+    /*Antialiasing an image that has an alpha channel is only correct in premultiplied space,
+     *so that is what the filter works in and what it writes out. Without the antialiasing the
+     *pixels are copied as they are and stay straight.*/
+    else if(cf_final == LV_COLOR_FORMAT_ARGB8888 && draw_dsc->antialias) {
+        cf_final = LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED;
+    }
+#endif
 
     uint8_t * transformed_buf;
     int32_t buf_h;
     if(cf_final == LV_COLOR_FORMAT_RGB565A8) {
         uint32_t buf_stride = blend_w * 3;
         buf_h = MAX_BUF_SIZE / buf_stride;
-        if(buf_h > blend_h) buf_h = blend_h;
+        buf_h = LV_CLAMP(1, buf_h, blend_h);
         transformed_buf = lv_malloc(buf_stride * buf_h);
+    }
+    else if(cf_final == LV_COLOR_FORMAT_AL88) {
+        uint32_t buf_stride = blend_w;
+        buf_h = MAX_BUF_SIZE / (buf_stride * 2);
+        buf_h = LV_CLAMP(1, buf_h, blend_h);
+        transformed_buf = lv_malloc(buf_stride * buf_h * 2);
     }
     else {
         uint32_t buf_stride = blend_w * lv_color_format_get_size(cf_final);
         buf_h = MAX_BUF_SIZE / buf_stride;
-        if(buf_h > blend_h) buf_h = blend_h;
+        buf_h = LV_CLAMP(1, buf_h, blend_h);
         transformed_buf = lv_malloc(buf_stride * buf_h);
     }
     LV_ASSERT_MALLOC(transformed_buf);
@@ -512,7 +539,17 @@ static void transform_and_recolor(lv_draw_task_t * t, const lv_draw_image_dsc_t 
         blend_dsc.mask_area = &blend_area;
         blend_dsc.mask_res = LV_DRAW_SW_MASK_RES_CHANGED;
         blend_dsc.mask_buf = transformed_buf + blend_w * 2 * buf_h;
+        blend_dsc.mask_stride = blend_w;
         blend_dsc.src_color_format = LV_COLOR_FORMAT_RGB565;
+    }
+    else if(cf_final == LV_COLOR_FORMAT_AL88) {
+        /*AL88 images will be blended as L8 + mask*/
+        blend_dsc.src_stride = blend_w;
+        blend_dsc.mask_area = &blend_area;
+        blend_dsc.mask_res = LV_DRAW_SW_MASK_RES_CHANGED;
+        blend_dsc.mask_buf = transformed_buf + blend_w * buf_h;
+        blend_dsc.mask_stride = blend_w;
+        blend_dsc.src_color_format = LV_COLOR_FORMAT_L8;
     }
     else if(cf_final == LV_COLOR_FORMAT_A8) {
         blend_dsc.mask_buf = transformed_buf;
@@ -528,16 +565,22 @@ static void transform_and_recolor(lv_draw_task_t * t, const lv_draw_image_dsc_t 
     while(blend_area.y1 <= y_last) {
         /*Apply transformations if any or separate the channels*/
         lv_area_t relative_area;
-        lv_area_copy(&relative_area, &blend_area);
+        relative_area = blend_area;
         lv_area_move(&relative_area, -img_coords->x1, -img_coords->y1);
         lv_draw_sw_transform(&relative_area, src_buf, src_w, src_h, img_stride,
                              draw_dsc, sup, cf, transformed_buf);
 
-        if(do_recolor) {
+        if(do_recolor || has_colorkey) {
             lv_area_t relative_area2;
-            lv_area_copy(&relative_area2, &blend_area);
+            relative_area2 = blend_area;
             lv_area_move(&relative_area2, -blend_area.x1, -blend_area.y1);
-            recolor(relative_area2, transformed_buf, transformed_buf, blend_dsc.src_stride, cf_final, draw_dsc);
+            if(has_colorkey && cf_final != LV_COLOR_FORMAT_RGB565_SWAPPED) {
+                colorkey_and_recolor(relative_area2, transformed_buf, transformed_buf, blend_dsc.src_stride, cf_final, draw_dsc,
+                                     &blend_dsc);
+            }
+            else {
+                recolor(relative_area2, transformed_buf, transformed_buf, blend_dsc.src_stride, cf_final, draw_dsc);
+            }
         }
 
         /*Blend*/
@@ -549,12 +592,217 @@ static void transform_and_recolor(lv_draw_task_t * t, const lv_draw_image_dsc_t 
         if(blend_area.y2 > y_last) {
             blend_area.y2 = y_last;
             if(cf_final == LV_COLOR_FORMAT_RGB565A8) {
-                blend_dsc.mask_buf =  transformed_buf + blend_w * 2 * lv_area_get_height(&blend_area);
+                blend_dsc.mask_buf = transformed_buf + blend_w * 2 * lv_area_get_height(&blend_area);
+            }
+            else if(cf_final == LV_COLOR_FORMAT_AL88) {
+                blend_dsc.mask_buf = transformed_buf + blend_w * lv_area_get_height(&blend_area);
             }
         }
     }
 
     lv_free(transformed_buf);
+}
+
+static void colorkey_and_recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_buf, int32_t src_stride,
+                                 lv_color_format_t cf, const lv_draw_image_dsc_t * draw_dsc, lv_draw_sw_blend_dsc_t * blend_dsc)
+{
+    int32_t w = lv_area_get_width(&relative_area);
+    int32_t h = lv_area_get_height(&relative_area);
+
+    /* Recolor parameters */
+    lv_color_t recolor = draw_dsc->recolor;
+    lv_opa_t mix = draw_dsc->recolor_opa;
+    lv_opa_t mix_inv = 255 - mix;
+
+    /* Colorkey parameters */
+    lv_color_t colorkey_low = draw_dsc->colorkey->low;
+    lv_color_t colorkey_high = draw_dsc->colorkey->high;
+    if(cf == LV_COLOR_FORMAT_RGB565A8 || cf == LV_COLOR_FORMAT_RGB565) {
+        const uint8_t * src_buf_tmp = src_buf + src_stride * relative_area.y1 + relative_area.x1 * 2;
+        int32_t img_stride_px = src_stride / 2;
+
+        uint16_t * buf16_src = (uint16_t *)src_buf_tmp;
+        uint16_t * buf16_dest = (uint16_t *)dest_buf;
+        uint16_t recolor16 = lv_color_to_u16(recolor);
+
+        uint16_t c_mult[3];
+        c_mult[0] = (recolor.blue >> 3) * mix;
+        c_mult[1] = (recolor.green >> 2) * mix;
+        c_mult[2] = (recolor.red >> 3) * mix;
+        uint8_t * mask_buf_tmp = (uint8_t *)blend_dsc->mask_buf;
+        int32_t y;
+        for(y = 0; y < h; y++) {
+            int32_t x;
+            for(x = 0; x < w; x++) {
+                lv_color_t src_color = lv_color16_to_color(*(lv_color16_t *)&buf16_src[x]);
+
+                /* Check colorkey */
+                if(lv_color_is_in_range(src_color, colorkey_low, colorkey_high)) {
+                    if(cf == LV_COLOR_FORMAT_RGB565A8 && mask_buf_tmp) {
+                        mask_buf_tmp[x] = 0;
+                    }
+                    else {
+                        *buf16_dest = 0x0000; // Transparent
+                    }
+                }
+                /* Apply recolor */
+                else if(mix >= LV_OPA_MAX) {
+                    *buf16_dest = recolor16;
+                }
+                else if(mix > LV_OPA_MIN) {
+                    uint16_t src16 = buf16_src[x];
+                    *buf16_dest = (((c_mult[2] + ((src16 >> 11) & 0x1F) * mix_inv) << 3) & 0xF800) +
+                                  (((c_mult[1] + ((src16 >> 5) & 0x3F) * mix_inv) >> 3) & 0x07E0) +
+                                  ((c_mult[0] + (src16 & 0x1F) * mix_inv) >> 8);
+                }
+                else {
+                    *buf16_dest = buf16_src[x]; // No change
+                }
+                buf16_dest++;
+            }
+            buf16_src += img_stride_px;
+            mask_buf_tmp += blend_dsc->mask_stride;
+        }
+    }
+    else if(cf == LV_COLOR_FORMAT_RGB888 || cf == LV_COLOR_FORMAT_XRGB8888 || cf == LV_COLOR_FORMAT_ARGB8888) {
+        uint32_t px_size = lv_color_format_get_size(cf);
+        const uint8_t * src_buf_tmp = src_buf + src_stride * relative_area.y1 + relative_area.x1 * px_size;
+        uint8_t * dest_buf_tmp = dest_buf;
+
+        uint16_t c_mult[3];
+        c_mult[0] = recolor.blue * mix;
+        c_mult[1] = recolor.green * mix;
+        c_mult[2] = recolor.red * mix;
+
+        int32_t y;
+        for(y = 0; y < h; y++) {
+            int32_t x;
+            for(x = 0; x < w; x++) {
+                lv_color_t src_color;
+                src_color.blue = src_buf_tmp[0];
+                src_color.green = src_buf_tmp[1];
+                src_color.red = src_buf_tmp[2];
+
+                if(lv_color_is_in_range(src_color, colorkey_low, colorkey_high)) {
+                    dest_buf_tmp[0] = 0;
+                    dest_buf_tmp[1] = 0;
+                    dest_buf_tmp[2] = 0;
+                    if(cf == LV_COLOR_FORMAT_ARGB8888) {
+                        dest_buf_tmp[3] = 0;
+                    }
+                    else if(cf == LV_COLOR_FORMAT_XRGB8888) {
+                        dest_buf_tmp[3] = 0xff;
+                    }
+                }
+                else if(mix >= LV_OPA_MAX) {
+                    dest_buf_tmp[0] = recolor.blue;
+                    dest_buf_tmp[1] = recolor.green;
+                    dest_buf_tmp[2] = recolor.red;
+                    if(cf == LV_COLOR_FORMAT_ARGB8888) {
+                        dest_buf_tmp[3] = src_buf_tmp[3];
+                    }
+                    else if(cf == LV_COLOR_FORMAT_XRGB8888) {
+                        dest_buf_tmp[3] = 0xff;
+                    }
+                }
+                else if(mix > LV_OPA_MIN) {
+                    dest_buf_tmp[0] = (c_mult[0] + (src_buf_tmp[0] * mix_inv)) >> 8;
+                    dest_buf_tmp[1] = (c_mult[1] + (src_buf_tmp[1] * mix_inv)) >> 8;
+                    dest_buf_tmp[2] = (c_mult[2] + (src_buf_tmp[2] * mix_inv)) >> 8;
+                    if(cf == LV_COLOR_FORMAT_ARGB8888) {
+                        dest_buf_tmp[3] = src_buf_tmp[3];
+                    }
+                    else if(cf == LV_COLOR_FORMAT_XRGB8888) {
+                        dest_buf_tmp[3] = 0xff;
+                    }
+                }
+                else {
+                    dest_buf_tmp[0] = src_buf_tmp[0];
+                    dest_buf_tmp[1] = src_buf_tmp[1];
+                    dest_buf_tmp[2] = src_buf_tmp[2];
+                    if(cf == LV_COLOR_FORMAT_ARGB8888) {
+                        dest_buf_tmp[3] = src_buf_tmp[3];
+                    }
+                    else if(cf == LV_COLOR_FORMAT_XRGB8888) {
+                        dest_buf_tmp[3] = 0xff;
+                    }
+                }
+
+                src_buf_tmp += px_size;
+                dest_buf_tmp += px_size;
+            }
+            src_buf_tmp += (src_stride - w * px_size);
+        }
+    }
+    else if(cf == LV_COLOR_FORMAT_ARGB8888_PREMULTIPLIED) {
+        uint32_t px_size = 4;
+        const uint8_t * src_buf_tmp = src_buf + src_stride * relative_area.y1 + relative_area.x1 * px_size;
+        uint8_t * dest_buf_tmp = dest_buf;
+
+        uint16_t c_mult[3];
+        c_mult[0] = recolor.blue * mix;
+        c_mult[1] = recolor.green * mix;
+        c_mult[2] = recolor.red * mix;
+
+        int32_t y;
+        for(y = 0; y < h; y++) {
+            int32_t x;
+            for(x = 0; x < w; x++) {
+                uint8_t alpha = src_buf_tmp[3];
+
+                // Only process if pixel is visible
+                if(alpha > 0) {
+                    /* Unpremultiply for color comparison and recolor */
+                    uint16_t reciprocal = (255 * 256) / alpha;
+                    uint8_t r = (src_buf_tmp[2] * reciprocal) >> 8;
+                    uint8_t g = (src_buf_tmp[1] * reciprocal) >> 8;
+                    uint8_t b = (src_buf_tmp[0] * reciprocal) >> 8;
+
+                    lv_color_t src_color = lv_color_make(r, g, b);
+
+                    /* Check colorkey */
+                    if(lv_color_is_in_range(src_color, colorkey_low, colorkey_high)) {
+                        // Set entire pixel to transparent
+                        dest_buf_tmp[0] = 0;
+                        dest_buf_tmp[1] = 0;
+                        dest_buf_tmp[2] = 0;
+                        dest_buf_tmp[3] = 0;
+                    }
+                    /* Apply recolor */
+                    else {
+                        if(mix >= LV_OPA_MAX) {
+                            r = recolor.red;
+                            g = recolor.green;
+                            b = recolor.blue;
+                        }
+                        else if(mix > LV_OPA_MIN) {
+                            r = (c_mult[2] + (r * mix_inv)) >> 8;
+                            g = (c_mult[1] + (g * mix_inv)) >> 8;
+                            b = (c_mult[0] + (b * mix_inv)) >> 8;
+                        }
+                        // Else keep original colors
+
+                        /* Premultiply again */
+                        dest_buf_tmp[0] = (b * alpha) >> 8;
+                        dest_buf_tmp[1] = (g * alpha) >> 8;
+                        dest_buf_tmp[2] = (r * alpha) >> 8;
+                        dest_buf_tmp[3] = alpha; // Keep original alpha
+                    }
+                }
+                else {
+                    // Already transparent, copy as-is
+                    dest_buf_tmp[0] = src_buf_tmp[0];
+                    dest_buf_tmp[1] = src_buf_tmp[1];
+                    dest_buf_tmp[2] = src_buf_tmp[2];
+                    dest_buf_tmp[3] = 0; // Ensure alpha is 0
+                }
+
+                src_buf_tmp += px_size;
+                dest_buf_tmp += px_size;
+            }
+            src_buf_tmp += (src_stride - w * px_size);
+        }
+    }
 }
 
 static void recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_buf, int32_t src_stride,
@@ -660,6 +908,7 @@ static void recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_b
                         dest_buf[1] = color.green;
                         dest_buf[2] = color.red;
                         if(cf == LV_COLOR_FORMAT_ARGB8888) dest_buf[3] = src_buf[3];
+                        else if(cf == LV_COLOR_FORMAT_XRGB8888) dest_buf[3] = 0xff;
                         src_buf += px_size;
                         dest_buf += px_size;
                     }
@@ -679,6 +928,7 @@ static void recolor(lv_area_t relative_area, uint8_t * src_buf, uint8_t * dest_b
                         dest_buf[1] = (c_mult[1] + (src_buf[1] * mix_inv)) >> 8;
                         dest_buf[2] = (c_mult[2] + (src_buf[2] * mix_inv)) >> 8;
                         if(cf == LV_COLOR_FORMAT_ARGB8888) dest_buf[3] = src_buf[3];
+                        else if(cf == LV_COLOR_FORMAT_XRGB8888) dest_buf[3] = 0xff;
                         src_buf += px_size;
                         dest_buf += px_size;
                     }

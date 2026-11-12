@@ -25,7 +25,7 @@
  */
 
 /**
- * @file lv_draw_nema_gfx_fill.c
+ * @file lv_draw_nema_gfx_triangle.c
  *
  */
 
@@ -48,7 +48,7 @@ void lv_draw_nema_gfx_triangle(lv_draw_task_t * t, const lv_draw_triangle_dsc_t 
     lv_layer_t * layer = t->target_layer;
 
     lv_area_t rel_clip_area;
-    lv_area_copy(&rel_clip_area, &t->clip_area);
+    rel_clip_area = t->clip_area;
     lv_area_move(&rel_clip_area, -layer->buf_area.x1, -layer->buf_area.y1);
 
     lv_area_t coords;
@@ -90,7 +90,9 @@ void lv_draw_nema_gfx_triangle(lv_draw_task_t * t, const lv_draw_triangle_dsc_t 
         uint32_t bg_color = nema_rgba(col32.red, col32.green, col32.blue, col32.alpha);
 
         nema_enable_aa(1, 1, 1, 0);
-        nema_fill_triangle(dsc->p[0].x, dsc->p[0].y, dsc->p[1].x, dsc->p[1].y, dsc->p[2].x, dsc->p[2].y, bg_color);
+        nema_fill_triangle(dsc->p[0].x - layer->buf_area.x1, dsc->p[0].y - layer->buf_area.y1,
+                           dsc->p[1].x - layer->buf_area.x1, dsc->p[1].y - layer->buf_area.y1,
+                           dsc->p[2].x - layer->buf_area.x1, dsc->p[2].y - layer->buf_area.y1, bg_color);
     }
 #if LV_USE_NEMA_VG
     else {

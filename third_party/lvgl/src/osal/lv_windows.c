@@ -7,12 +7,11 @@
  *      INCLUDES
  *********************/
 
-#include "lv_os.h"
+#include "lv_os_private.h"
 
 #if LV_USE_OS == LV_OS_WINDOWS
 
 #include <process.h>
-#include "../misc/lv_timer.h"
 
 /*********************
  *      DEFINES
@@ -107,12 +106,15 @@ lv_result_t lv_thread_init(
 lv_result_t lv_thread_delete(lv_thread_t * thread)
 {
     lv_result_t result = LV_RESULT_OK;
+    if(!thread) {
+        return LV_RESULT_OK;
+    }
 
-    if(!TerminateThread(thread, 0)) {
+    if(!TerminateThread(*thread, 0)) {
         result = LV_RESULT_INVALID;
     }
 
-    CloseHandle(thread);
+    CloseHandle(*thread);
 
     return result;
 }
@@ -210,6 +212,11 @@ lv_result_t lv_thread_sync_signal_isr(lv_thread_sync_t * sync)
 uint32_t lv_os_get_idle_percent(void)
 {
     return lv_timer_get_idle();
+}
+
+void lv_sleep_ms(uint32_t ms)
+{
+    Sleep(ms);
 }
 
 /**********************

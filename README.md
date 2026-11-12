@@ -48,7 +48,7 @@ sudo pacman -S base-devel cmake pkgconf sdl2 libpng glib2 wayland libx11 libxext
 - grim、jq、7zip、librsvg、xdg-desktop-portal、desktop-file-utils、shared-mime-info
 - Qt6（SDDM 主题）、hicolor / papirus 图标、flatpak、pacman
 
-LVGL 已内置在 `third_party/lvgl`，无需联网下载。
+LVGL 9.6 已内置在 `third_party/lvgl`（公共头文件 + 核心源码），无需联网下载；ARM 平台启用 NEON 软件渲染加速。
 
 ## 构建
 

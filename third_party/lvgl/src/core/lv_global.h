@@ -13,36 +13,17 @@ extern "C" {
 /*********************
  *      INCLUDES
  *********************/
-#include "../lv_conf_internal.h"
+#include "../lvgl_public.h"
 
-#include "../misc/lv_types.h"
-#include "../draw/lv_draw.h"
 #if LV_USE_DRAW_SW
 #include "../draw/sw/lv_draw_sw.h"
 #endif
-#include "../misc/lv_anim.h"
-#include "../misc/lv_area.h"
-#include "../misc/lv_color_op.h"
-#include "../misc/lv_ll.h"
-#include "../misc/lv_log.h"
-#include "../misc/lv_style.h"
-#include "../misc/lv_timer.h"
-#include "../osal/lv_os.h"
-#include "../others/sysmon/lv_sysmon.h"
+#include "../osal/lv_os_private.h"
 #include "../stdlib/builtin/lv_tlsf.h"
 
 #if LV_USE_FONT_COMPRESSED
-#include "../font/lv_font_fmt_txt_private.h"
+#include "../font/fmt_txt/lv_font_fmt_txt_private.h"
 #endif
-
-#if LV_USE_OS != LV_OS_NONE && defined(__linux__)
-#include "../osal/lv_linux_private.h"
-#endif
-
-#include "../tick/lv_tick.h"
-#include "../layouts/lv_layout.h"
-
-#include "../misc/lv_types.h"
 
 #include "../misc/lv_timer_private.h"
 #include "../misc/lv_anim_private.h"
@@ -52,8 +33,8 @@ extern "C" {
 #include "../draw/sw/lv_draw_sw_private.h"
 #include "../draw/sw/lv_draw_sw_mask_private.h"
 #include "../stdlib/builtin/lv_tlsf_private.h"
-#include "../others/sysmon/lv_sysmon_private.h"
-#include "../others/test/lv_test_private.h"
+#include "../debugging/sysmon/lv_sysmon_private.h"
+#include "../debugging/test/lv_test_private.h"
 #include "../layouts/lv_layout_private.h"
 
 /*********************
@@ -82,6 +63,14 @@ struct _lv_nuttx_ctx_t;
 #endif
 
 typedef struct _lv_global_t {
+    /**
+     * User data for the LVGL library. Move from the bottom of the struct
+     * to avoid breaking the ABI. E.g., if the user data is used by a
+     * closed-source library, this can help to avoid re-compiling the library
+     * when the lvgl-related configs are changed.
+     */
+    void * user_data;
+
     bool inited;
     bool deinit_in_progress;     /**< Can be used e.g. in the LV_EVENT_DELETE to deinit the drivers too */
 
@@ -91,6 +80,9 @@ typedef struct _lv_global_t {
 
     lv_ll_t style_trans_ll;
     bool style_refresh;
+    /** Number of widgets that currently have blur or a drop shadow (see
+     * lv_obj_t::has_blur). If it is zero lv_obj_invalidate_expand_blur() is skipped. */
+    uint32_t blur_obj_cnt;
     uint32_t style_custom_table_size;
     uint32_t style_last_custom_prop_id;
     uint8_t * style_custom_prop_flag_lookup_table;
@@ -122,12 +114,21 @@ typedef struct _lv_global_t {
                                                             * can be managed by image cache. */
 
     lv_ll_t img_decoder_ll;
+#if LV_USE_OS != LV_OS_NONE
+    lv_mutex_t img_decoder_info_lock;
+    lv_mutex_t img_decoder_open_lock;
+#endif
 
     lv_cache_t * img_cache;
     lv_cache_t * img_header_cache;
 
     lv_draw_global_info_t draw_info;
     lv_ll_t draw_sw_blend_handler_ll;
+
+#if LV_USE_OBSERVER
+    lv_ll_t subject_ll;
+#endif
+
 #if defined(LV_DRAW_SW_SHADOW_CACHE_SIZE) && LV_DRAW_SW_SHADOW_CACHE_SIZE > 0
     lv_draw_sw_shadow_cache_t sw_shadow_cache;
 #endif
@@ -191,6 +192,10 @@ typedef struct _lv_global_t {
     lv_fs_drv_t arduino_sd_fs_drv;
 #endif
 
+#if LV_USE_FS_FROGFS
+    lv_fs_drv_t frogfs_fs_drv;
+#endif
+
 #if LV_USE_FREETYPE
     struct _lv_freetype_context_t * ft_context;
 #endif
@@ -207,8 +212,10 @@ typedef struct _lv_global_t {
     struct _lv_profiler_builtin_ctx_t * profiler_context;
 #endif
 
-#if LV_USE_FILE_EXPLORER != 0
-    lv_style_t fe_list_button_style;
+
+#if LV_USE_FILE_EXPLORER
+    lv_style_t file_explorer_quick_access_style;
+    size_t file_explorer_count;
 #endif
 
 #if LV_USE_MEM_MONITOR
@@ -228,14 +235,24 @@ typedef struct _lv_global_t {
     lv_test_state_t test_state;
 #endif
 
+#if LV_USE_TRANSLATION
+    lv_ll_t translation_packs_ll;
+    const char * translation_selected_lang;
+#endif
+
 #if LV_USE_NUTTX
     struct _lv_nuttx_ctx_t * nuttx_ctx;
 #endif
 
 #if LV_USE_OS != LV_OS_NONE
     lv_mutex_t lv_general_mutex;
+#endif
+
 #if defined(__linux__)
-    lv_proc_stat_t linux_last_proc_stat;
+    lv_linux_proc_stat_t linux_last_proc_stat;
+#if LV_SYSMON_PROC_IDLE_AVAILABLE
+    uint64_t linux_last_self_proc_time_ticks;
+    lv_linux_proc_stat_t linux_last_system_total_ticks_stat;
 #endif
 #endif
 
@@ -250,7 +267,9 @@ typedef struct _lv_global_t {
     lv_evdev_discovery_t * evdev_discovery;
 #endif
 
-    void * user_data;
+#if LV_USE_DRAW_EVE
+    lv_draw_eve_unit_t * draw_eve_unit;
+#endif
 } lv_global_t;
 
 /**********************
@@ -258,7 +277,9 @@ typedef struct _lv_global_t {
  **********************/
 
 #if LV_ENABLE_GLOBAL_CUSTOM
+#if LV_GLOBAL_USE_CUSTOM_INCLUDE
 #include LV_GLOBAL_CUSTOM_INCLUDE
+#endif /*LV_GLOBAL_USE_CUSTOM_INCLUDE*/
 
 #ifndef LV_GLOBAL_CUSTOM
 #define LV_GLOBAL_CUSTOM() lv_global_default()
@@ -267,7 +288,7 @@ typedef struct _lv_global_t {
 #else
 LV_ATTRIBUTE_EXTERN_DATA extern lv_global_t lv_global;
 #define LV_GLOBAL_DEFAULT() (&lv_global)
-#endif
+#endif /*LV_ENABLE_GLOBAL_CUSTOM*/
 
 /**********************
  * GLOBAL PROTOTYPES

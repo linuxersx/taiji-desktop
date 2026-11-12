@@ -14,7 +14,8 @@ extern "C" {
  *      INCLUDES
  *********************/
 
-#include "lv_3dtexture.h"
+#include "../../lvgl_public.h"
+
 #if LV_USE_3DTEXTURE
 
 #include "../../core/lv_obj_private.h"
@@ -31,6 +32,8 @@ extern "C" {
 struct _lv_3dtexture_t {
     lv_obj_t obj;
     lv_3dtexture_id_t id;
+    bool h_flip;
+    bool v_flip;
 };
 
 /**********************

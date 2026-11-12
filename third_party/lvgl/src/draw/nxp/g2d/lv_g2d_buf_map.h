@@ -21,11 +21,12 @@ extern "C" {
  *      INCLUDES
  *********************/
 
-#include "../../../lv_conf_internal.h"
+#include "../../../lvgl_public.h"
 
 #if LV_USE_DRAW_G2D
 
 #include "../../../misc/lv_array.h"
+
 #include <string.h>
 
 /*********************

@@ -99,7 +99,7 @@ void ui_build_editor(App *app)
             if (col < 0) col = 0;
             if (col > len) col = len;
             caret_x = ui_scale_x(8 + num_w) +
-                      lv_text_get_width(line, (uint32_t)col, FONT_SM, 0);
+                      ui_text_width(line, (uint32_t)col, FONT_SM, 0);
             caret_y = ui_scale_y(6 + (i - top) * row_h + label_y);
             caret_h = ui_scale_y(text_h);
         }

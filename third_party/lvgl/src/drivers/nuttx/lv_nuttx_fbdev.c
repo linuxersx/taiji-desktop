@@ -6,21 +6,25 @@
 /*********************
  *      INCLUDES
  *********************/
-#include "lv_nuttx_fbdev.h"
+#include "../../lvgl_public.h"
 #if LV_USE_NUTTX
 
 #include <stdlib.h>
 #include <unistd.h>
-#include <stddef.h>
+#include LV_STDDEF_INCLUDE
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
-#include <nuttx/video/fb.h>
 
-#include "../../../lvgl.h"
+#ifdef __NuttX__
+    #include <nuttx/video/fb.h>
+#else
+    #include "mock/nuttx_video_fb.h"
+#endif
+
 #include "../../lvgl_private.h"
 
 /*********************
@@ -96,6 +100,8 @@ lv_display_t * lv_nuttx_fbdev_create(void)
 
 int lv_nuttx_fbdev_set_file(lv_display_t * disp, const char * file)
 {
+    LV_CHECK_ARG(disp != NULL, return -EINVAL);
+    LV_CHECK_ARG(file != NULL, return -EINVAL);
     int ret;
     LV_ASSERT(disp && file);
     lv_nuttx_fb_t * dsc = lv_display_get_driver_data(disp);
@@ -218,7 +224,7 @@ static void fbdev_join_inv_areas(lv_display_t * disp, lv_area_t * final_inv_area
 
             if(!area_joined) {
                 /* copy first area */
-                lv_area_copy(final_inv_area, area_p);
+                *final_inv_area = *area_p;
                 area_joined = true;
             }
             else {
@@ -334,7 +340,7 @@ static lv_color_format_t fb_fmt_to_color_format(int fmt)
     return LV_COLOR_FORMAT_UNKNOWN;
 }
 
-static int fbdev_get_pinfo(int fd, FAR struct fb_planeinfo_s * pinfo)
+static int fbdev_get_pinfo(int fd, struct fb_planeinfo_s * pinfo)
 {
     if(ioctl(fd, FBIOGET_PLANEINFO, (unsigned long)((uintptr_t)pinfo)) < 0) {
         LV_LOG_ERROR("ERROR: ioctl(FBIOGET_PLANEINFO) failed: %d", errno);
@@ -443,7 +449,7 @@ static int fbdev_init_mem3(lv_nuttx_fb_t * dsc)
      * It needs to be divisible by pinfo.stride
      */
 
-    buf_offset = pinfo.fbmem - dsc->mem;
+    buf_offset = (uintptr_t)pinfo.fbmem - (uintptr_t)dsc->mem;
 
     if((buf_offset % dsc->pinfo.stride) != 0) {
         LV_LOG_WARN("It is detected that buf_offset(%" PRIuPTR ") "
@@ -456,7 +462,7 @@ static int fbdev_init_mem3(lv_nuttx_fb_t * dsc)
 
     if(buf_offset == 0) {
         dsc->mem3_yoffset = dsc->vinfo.yres * 2;
-        dsc->mem3 = pinfo.fbmem + dsc->mem3_yoffset * pinfo.stride;
+        dsc->mem3 = (uint8_t *)pinfo.fbmem + dsc->mem3_yoffset * pinfo.stride;
         LV_LOG_USER("Use consecutive mem3 = %p, yoffset = %" LV_PRIu32,
                     dsc->mem3, dsc->mem3_yoffset);
     }

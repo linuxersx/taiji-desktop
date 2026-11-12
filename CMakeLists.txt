@@ -43,6 +43,7 @@ list(FILTER LVGL_SOURCES EXCLUDE REGEX "[ ]2\\.c$")
 add_library(lvgl STATIC ${LVGL_SOURCES})
 target_include_directories(lvgl PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/include"
   "${CMAKE_CURRENT_SOURCE_DIR}"
   ${PNG_INCLUDE_DIRS}
 )

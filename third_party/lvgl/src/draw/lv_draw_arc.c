@@ -6,11 +6,8 @@
 /*********************
  *      INCLUDES
  *********************/
+
 #include "lv_draw_private.h"
-#include "../core/lv_obj.h"
-#include "lv_draw_arc.h"
-#include "../core/lv_obj_event.h"
-#include "../stdlib/lv_string.h"
 
 /*********************
  *      DEFINES
@@ -38,6 +35,8 @@
 
 void lv_draw_arc_dsc_init(lv_draw_arc_dsc_t * dsc)
 {
+    LV_CHECK_ARG(dsc != NULL, return);
+
     lv_memzero(dsc, sizeof(lv_draw_arc_dsc_t));
     dsc->width = 1;
     dsc->opa = LV_OPA_COVER;
@@ -47,11 +46,16 @@ void lv_draw_arc_dsc_init(lv_draw_arc_dsc_t * dsc)
 
 lv_draw_arc_dsc_t * lv_draw_task_get_arc_dsc(lv_draw_task_t * task)
 {
+    LV_CHECK_ARG(task != NULL, return NULL);
+
     return task->type == LV_DRAW_TASK_TYPE_ARC ? (lv_draw_arc_dsc_t *)task->draw_dsc : NULL;
 }
 
 void lv_draw_arc(lv_layer_t * layer, const lv_draw_arc_dsc_t * dsc)
 {
+    LV_CHECK_ARG(layer != NULL, return);
+    LV_CHECK_ARG(dsc != NULL, return);
+
     if(dsc->opa <= LV_OPA_MIN) return;
     if(dsc->width == 0) return;
     if(dsc->start_angle == dsc->end_angle) return;
@@ -62,6 +66,16 @@ void lv_draw_arc(lv_layer_t * layer, const lv_draw_arc_dsc_t * dsc)
     a.y1 = dsc->center.y - dsc->radius;
     a.x2 = dsc->center.x + dsc->radius - 1;
     a.y2 = dsc->center.y + dsc->radius - 1;
+
+    if(dsc->base.drop_shadow_opa) {
+        lv_layer_t * ds_layer = lv_draw_layer_create_drop_shadow(layer, &dsc->base, &a);
+        LV_ASSERT_NULL(ds_layer);
+        lv_draw_arc_dsc_t ds_dsc = *dsc;
+        ds_dsc.base.drop_shadow_opa = 0; /*Disable drop shadow so rendering below will render plain arc*/
+        lv_draw_arc(ds_layer, &ds_dsc);
+        lv_draw_layer_finish_drop_shadow(ds_layer, &dsc->base);
+    }
+
     lv_draw_task_t * t = lv_draw_add_task(layer, &a, LV_DRAW_TASK_TYPE_ARC);
 
     lv_memcpy(t->draw_dsc, dsc, sizeof(*dsc));
@@ -75,9 +89,22 @@ void lv_draw_arc_get_area(int32_t x, int32_t y, uint16_t radius,  lv_value_preci
                           lv_value_precise_t end_angle,
                           int32_t w, bool rounded, lv_area_t * area)
 {
+    LV_CHECK_ARG(area != NULL, return);
+
     int32_t rout = radius;
     int32_t start_angle_int = (int32_t) start_angle;
     int32_t end_angle_int = (int32_t) end_angle;
+
+    /*Guard: radius too small for stroke width — return outer-radius bounding box
+     *to avoid negative rin causing inverted trig calculations.
+     *The arc never draws outside its outer radius regardless of stroke width. */
+    if(radius <= w) {
+        area->x1 = x - rout;
+        area->y1 = y - rout;
+        area->x2 = x + rout;
+        area->y2 = y + rout;
+        return;
+    }
 
     /*Special case: full arc invalidation */
     if(end_angle_int == start_angle_int + 360) {

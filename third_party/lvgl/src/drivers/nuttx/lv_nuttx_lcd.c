@@ -7,7 +7,7 @@
  *      INCLUDES
  *********************/
 
-#include "lv_nuttx_lcd.h"
+#include "../../lvgl_public.h"
 
 #if LV_USE_NUTTX
 
@@ -17,13 +17,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <debug.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <nuttx/lcd/lcd_dev.h>
 
-#include "../../../lvgl.h"
 #include "../../lvgl_private.h"
+
+#ifdef __NuttX__
+    #include <debug.h>
+    #include <nuttx/lcd/lcd_dev.h>
+#else
+    #include "mock/nuttx_lcd_dev.h"
+#endif
 
 /*********************
  *      DEFINES
@@ -72,7 +76,7 @@ lv_display_t * lv_nuttx_lcd_create(const char * dev_path)
     int fd;
     int ret;
 
-    LV_ASSERT_NULL(dev_path);
+    LV_CHECK_ARG(dev_path != NULL, return NULL);
 
     LV_LOG_USER("lcd %s opening", dev_path);
     fd = open(dev_path, 0);
