@@ -1242,6 +1242,7 @@ static int mode_index_of(const bool modes[3], int mode)
 void app_open_control_center_view(App *app, int view)
 {
     if (app->ui_suspended) return;
+    app->control_return_status = false;
     app->control_osd = false;
     if (view == STATUS_WIFI) {
         /* Detect both radio switches first, then scan asynchronously so the
@@ -2242,6 +2243,21 @@ void app_close_modal(App *app)
         ui_update_app_badge(app);
     }
     if (app->modal == MODAL_CONTROL && !app->control_closing) {
+        if (app->control_return_status) {
+            int n = app->ui.status_item_count;
+            if (n > 0) {
+                app->status_on_bar = true;
+                app->nav_on_bar = false;
+                if (app->control_return_status_focus < 0)
+                    app->control_return_status_focus = 0;
+                if (app->control_return_status_focus >= n)
+                    app->control_return_status_focus = n - 1;
+                app->status_focus = app->control_return_status_focus;
+                ui_update_status_focus(app);
+                ui_update_nav_focus(app);
+            }
+            app->control_return_status = false;
+        }
         app->control_closing = true;
         app->modal_closing = true;
         ui_set_input_active(false);
@@ -5017,9 +5033,12 @@ static void app_input_status(App *app, InputAction action)
         audio_play(SND_NAV);
     } else if (action == IN_CONFIRM || action == IN_A) {
         int kind = app->ui.status_kinds[app->status_focus];
+        int return_focus = app->status_focus;
         app->status_on_bar = false;
         ui_update_status_focus(app);
         app_open_control_center_view(app, kind);
+        app->control_return_status = true;
+        app->control_return_status_focus = return_focus;
         audio_play(SND_ENTER);
     } else if (action == IN_DOWN) {
         app->status_on_bar = false;

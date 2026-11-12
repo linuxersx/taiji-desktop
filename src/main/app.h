@@ -327,6 +327,8 @@ typedef struct App {
     uint32_t control_osd_until;
     bool status_on_bar;
     int status_focus;
+    bool control_return_status;
+    int control_return_status_focus;
     uint32_t control_opened_at;
     char wifi_connect_ssid[128];
     Launcher launcher;
