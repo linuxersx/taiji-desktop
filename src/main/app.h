@@ -383,13 +383,10 @@ typedef struct App {
     bool nav_on_bar;
     bool modal_closing;
     int nav_focus;
-    bool ime_visible;
     int ext_osk_fd;
     bool ext_osk_attached;
     char ext_osk_buf[1024];
     size_t ext_osk_len;
-    bool ime_shift;
-    bool ime_handling;
     char app_cat[32];
     int app_filter[64];
     int app_filter_count;

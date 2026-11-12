@@ -420,3 +420,13 @@ void external_osk_poll(App *app)
         app->ext_osk_len = left;
     }
 }
+
+void ui_ime_show(App *app)
+{
+    external_osk_show(app);
+}
+
+void ui_ime_hide(App *app)
+{
+    external_osk_hide(app);
+}

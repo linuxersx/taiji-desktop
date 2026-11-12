@@ -257,7 +257,6 @@ void app_init(App *app)
     app->pending_input_action = 0;
     app->pending_overview_focus = -1;
     app->pending_overview_activate = -1;
-    ui_set_external_osk_mode(external_osk_available());
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -5080,16 +5079,8 @@ static void app_trace(const char *fmt, ...)
 void app_input(App *app, InputAction action, const char *text)
 {
     if (action == IN_NONE) return;
-    app_trace("action=%d modal=%d ime=%d text=%s", (int)action, app->modal,
-              app->ime_visible, text ? text : "");
-    if (!app->ime_handling && app->ime_visible && app->ui.keyboard &&
-        (app->modal == MODAL_TEXT || app->modal == MODAL_SEARCH) &&
-        (action == IN_UP || action == IN_DOWN || action == IN_LEFT ||
-         action == IN_RIGHT || action == IN_PAD_CONFIRM ||
-         action == IN_PAD_CANCEL)) {
-        ui_ime_input(app, action);
-        return;
-    }
+    app_trace("action=%d modal=%d text=%s", (int)action, app->modal,
+              text ? text : "");
     if (action == IN_PAD_CONFIRM) action = IN_CONFIRM;
     else if (action == IN_PAD_CANCEL) action = IN_CANCEL;
     if (action == IN_VOLUME_UP || action == IN_VOLUME_DOWN) {
