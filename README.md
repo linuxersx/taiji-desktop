@@ -42,7 +42,6 @@ sudo pacman -S base-devel cmake pkgconf sdl2 libpng glib2 wayland libx11 libxext
 运行依赖（完整列表见 `packaging/arch-bin/PKGBUILD`）：
 
 - SDDM、sway、weston、xorg-server / xorg-xwayland
-- armdeck-osk（独立屏幕键盘包）
 - NetworkManager、BlueZ、power-profiles-daemon
 - PipeWire + WirePlumber
 - polkit、udisks2、gvfs（含 SMB）、samba、avahi

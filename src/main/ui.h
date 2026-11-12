@@ -145,6 +145,7 @@ typedef struct {
     lv_obj_t *modal_panel;
     lv_obj_t *modal_list[16];
     lv_obj_t *modal_scroll;
+    lv_obj_t *keyboard;
     lv_obj_t *modal_anim_target;
     int modal_list_count;
     lv_obj_t *mapping_label;
@@ -173,6 +174,8 @@ void ui_build_modal(struct App *app);
 void ui_refresh_modal(struct App *app);
 void ui_ime_show(struct App *app);
 void ui_ime_hide(struct App *app);
+void ui_ime_raise(struct App *app);
+void ui_ime_input(struct App *app, InputAction action);
 void ui_close_modal_visual(struct App *app);
 void ui_toast(struct App *app, const char *text);
 void ui_tick(struct App *app);
@@ -186,6 +189,7 @@ void ui_update_brightness_modal(struct App *app);
 void ui_fade_in_modal(struct App *app);
 void ui_fade_out_modal(struct App *app);
 void ui_set_input_active(bool active);
+void ui_set_external_osk_mode(bool enabled);
 lv_obj_t *ui_modal_panel(struct App *app, int w, int h);
 void ui_draw_spinner_overlay(struct App *app, const char *title, const char *detail);
 

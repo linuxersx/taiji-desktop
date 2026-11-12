@@ -100,6 +100,7 @@ add_executable(taiji
   src/main/ui_control.c
   src/main/ui_settings.c
   src/main/ui_modal.c
+  src/main/ui_keyboard.c
   src/main/ui_gamepad.c
   src/main/ui_overview.c
   src/main/editor.c

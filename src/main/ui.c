@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app.h"
-#include "external_osk.h"
 #include "i18n.h"
 #include "theme.h"
 #include "util.h"
@@ -1251,6 +1250,7 @@ static void fade_out_done(lv_anim_t *a)
     app->ui.modal_panel = NULL;
     app->ui.modal_input = NULL;
     app->ui.modal_list_count = 0;
+    app->ui.keyboard = NULL;
     if (app->ui.control_volume_value) {
         app->ui.control_volume_value = NULL;
         app->ui.control_volume_icon = NULL;
@@ -1572,12 +1572,20 @@ void ui_tick(App *app)
     }
 }
 
+static bool g_external_osk_mode;
+
+void ui_set_external_osk_mode(bool enabled)
+{
+    g_external_osk_mode = enabled;
+}
+
 void ui_set_input_active(bool active)
 {
-    /* 所有文本输入统一由 armdeck-osk 负责。装了外置键盘时不再启用
-     * SDL/Wayland 的系统输入法，避免同一串字符被输入两次；没有外置
-     * 键盘的开发环境仍允许实体键盘输入。 */
-    if (external_osk_available()) {
+    /* When the standalone keyboard is installed, Taiji's own fields are
+     * driven over the private socket.  Do not create an SDL text-input
+     * context, otherwise Sway also activates the Wayland input method and
+     * the same characters reach the field twice. */
+    if (g_external_osk_mode) {
         backend_text_input(false);
         return;
     }
@@ -1624,6 +1632,8 @@ void ui_close_modal_visual(App *app)
     }
     app->ui.modal_panel = NULL;
     app->ui.modal_scroll = NULL;
+    app->ui.keyboard = NULL;
+    app->ime_visible = false;
     app->ui.modal_list_count = 0;
     app->ui.modal_input = NULL;
     app->ui.control_wifi_value = NULL;
@@ -1727,6 +1737,9 @@ void ui_refresh_modal(App *app)
     g_sx = 1.0f;
     g_sy = 1.0f;
     modal_fonts_end();
+    if ((app->modal == MODAL_TEXT || app->modal == MODAL_SEARCH) &&
+        app->ui.keyboard && app->ime_visible)
+        ui_ime_raise(app);
 }
 
 /* Shared helpers for modal builders. */
